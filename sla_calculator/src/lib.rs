@@ -187,16 +187,23 @@ pub fn set_config(
         configs.get(severity).ok_or(SLAError::ConfigNotFound)
     }
 
-    pub fn list_configs(env: Env) -> Result<Map<Symbol, SLAConfig>, SLAError> {
-        env.storage()
-            .instance()
-            .get(&CONFIG_KEY)
-            .ok_or(SLAError::NotInitialized)
-    }
+pub fn list_configs(env: Env) -> Result<Map<Symbol, SLAConfig>, SLAError> {
+    env.storage()
+        .instance()
+        .get(&CONFIG_KEY)
+        .ok_or(SLAError::NotInitialized)
+}
 
-    // --------------------
-    // SLA calculation
-    // --------------------
+pub fn get_config(env: Env, severity: Symbol) -> Result<SLAConfig, SLAError> {
+    let configs: Map<Symbol, SLAConfig> = env
+        .storage()
+        .instance()
+        .get(&CONFIG_KEY)
+        .ok_or(SLAError::NotInitialized)?;
+
+    configs.get(severity).ok_or(SLAError::ConfigNotFound)
+}
+
 
 pub fn calculate_sla(
     env: Env,
