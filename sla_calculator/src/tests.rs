@@ -1,21 +1,22 @@
 #![cfg(test)]
 
-use super::*;
-use soroban_sdk::testutils::Address as _;
+use super::\*;
+use soroban*sdk::testutils::Address as *;
 use soroban_sdk::{Env};
+use soroban_sdk::testutils::Budget;
 
 #[test]
 fn test_admin_can_set_and_get_config() {
-    let env = Env::default();
-    let contract_id = env.register_contract(None, SLACalculatorContract);
-    let client = SLACalculatorContractClient::new(&env, &contract_id);
+let env = Env::default();
+let contract_id = env.register_contract(None, SLACalculatorContract);
+let client = SLACalculatorContractClient::new(&env, &contract_id);
 
     let admin = soroban_sdk::Address::generate(&env);
     let attacker = soroban_sdk::Address::generate(&env);
 
     client.initialize(&admin);
 
-    
+
     client.set_config(
         &admin,
         &symbol_short!("critical"),
@@ -29,21 +30,21 @@ fn test_admin_can_set_and_get_config() {
     assert_eq!(cfg.threshold_minutes, 15);
     assert_eq!(cfg.penalty_per_minute, 100);
     assert_eq!(cfg.reward_base, 750);
+
 }
 
-#[test]
-#[should_panic]
+#[test] #[should_panic]
 fn test_non_admin_cannot_set_config() {
-    let env = Env::default();
-    let contract_id = env.register_contract(None, SLACalculatorContract);
-    let client = SLACalculatorContractClient::new(&env, &contract_id);
+let env = Env::default();
+let contract_id = env.register_contract(None, SLACalculatorContract);
+let client = SLACalculatorContractClient::new(&env, &contract_id);
 
     let admin = soroban_sdk::Address::generate(&env);
     let attacker = soroban_sdk::Address::generate(&env);
 
     client.initialize(&admin);
 
-    
+
     client.set_config(
         &attacker,
         &symbol_short!("critical"),
@@ -51,13 +52,14 @@ fn test_non_admin_cannot_set_config() {
         &100,
         &750,
     );
+
 }
 
 #[test]
 fn test_defaults_exist_after_initialize() {
-    let env = Env::default();
-    let contract_id = env.register_contract(None, SLACalculatorContract);
-    let client = SLACalculatorContractClient::new(&env, &contract_id);
+let env = Env::default();
+let contract_id = env.register_contract(None, SLACalculatorContract);
+let client = SLACalculatorContractClient::new(&env, &contract_id);
 
     let admin = soroban_sdk::Address::generate(&env);
     client.initialize(&admin);
@@ -73,4 +75,73 @@ fn test_defaults_exist_after_initialize() {
 
     let low = client.get_config(&symbol_short!("low"));
     assert_eq!(low.threshold_minutes, 120);
+
+}
+
+#[test]
+fn test_calculate_sla_budget_is_reasonable() {
+let env = Env::default();
+env.budget().reset_unlimited();
+
+    let contract_id = env.register_contract(None, SLACalculatorContract);
+    let client = SLACalculatorContractClient::new(&env, &contract_id);
+
+    let admin = soroban_sdk::Address::generate(&env);
+    client.initialize(&admin).unwrap();
+
+
+    let before = env.budget().cpu_instruction_count();
+
+    let _ = client.calculate_sla(
+        &symbol_short!("OUT_BUDGET"),
+        &symbol_short!("critical"),
+        &25,
+    ).unwrap();
+
+
+    let after = env.budget().cpu_instruction_count();
+
+    let delta = after - before;
+
+
+
+    assert!(
+        delta < 200_000,
+        "SLA calculation is too expensive: {} instructions",
+        delta
+    );
+
+}
+
+#[test]
+fn test_set_config_budget_is_reasonable() {
+let env = Env::default();
+env.budget().reset_unlimited();
+
+    let contract_id = env.register_contract(None, SLACalculatorContract);
+    let client = SLACalculatorContractClient::new(&env, &contract_id);
+
+    let admin = soroban_sdk::Address::generate(&env);
+    client.initialize(&admin).unwrap();
+
+    let before = env.budget().cpu_instruction_count();
+
+    client.set_config(
+        &admin,
+        &symbol_short!("critical"),
+        &15,
+        &100,
+        &750,
+    ).unwrap();
+
+    let after = env.budget().cpu_instruction_count();
+
+    let delta = after - before;
+
+    assert!(
+        delta < 150_000,
+        "set_config is too expensive: {} instructions",
+        delta
+    );
+
 }
