@@ -209,6 +209,31 @@ Compatibility rule:
 - changes that alter symbol meanings or add new backend-facing semantics should
   increment the documented schema version intentionally
 
+## Event Convention
+
+Lifecycle events are versioned so backend consumers can reason about event shape
+without inferring it from position alone.
+
+Current event topic convention:
+
+- topic 0 -> event name
+- topic 1 -> event version
+- topic 2 -> event-specific context such as severity or caller
+
+Current event version:
+
+- `v1`
+
+Current SLA calculation event payload:
+
+- outage id
+- result status
+- payment type
+- rating
+- MTTR minutes
+- threshold minutes
+- amount
+
 ---
 
 ## Goal for Codex

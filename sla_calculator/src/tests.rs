@@ -2,7 +2,8 @@
 
 use super::*;
 use soroban_sdk::testutils::Address as _;
-use soroban_sdk::Env;
+use soroban_sdk::testutils::Events as _;
+use soroban_sdk::{Env, Symbol, TryIntoVal};
 
 // ============================================================
 // Test helpers
@@ -75,6 +76,64 @@ fn test_result_schema_is_explicit_and_stable() {
     assert_eq!(schema.rating_excellent, symbol_short!("excel"));
     assert_eq!(schema.rating_good, symbol_short!("good"));
     assert_eq!(schema.rating_poor, symbol_short!("poor"));
+}
+
+#[test]
+fn test_calculate_sla_emits_versioned_integration_event() {
+    let (env, client, actors) = setup();
+
+    client.calculate_sla(
+        &actors.operator,
+        &symbol_short!("EVT001"),
+        &symbol_short!("critical"),
+        &5,
+    );
+
+    let events = env.events().all();
+    let (_, topics, data) = events.last().unwrap();
+
+    let topic_0: Symbol = topics.get(0).unwrap().try_into_val(&env).unwrap();
+    let topic_1: Symbol = topics.get(1).unwrap().try_into_val(&env).unwrap();
+    let topic_2: Symbol = topics.get(2).unwrap().try_into_val(&env).unwrap();
+    let event_data: (Symbol, Symbol, Symbol, Symbol, u32, u32, i128) = data
+        .try_into_val(&env)
+        .unwrap();
+
+    assert_eq!(topic_0, EVENT_SLA_CALC);
+    assert_eq!(topic_1, EVENT_VERSION);
+    assert_eq!(topic_2, symbol_short!("critical"));
+    assert_eq!(
+        event_data,
+        (
+            symbol_short!("EVT001"),
+            symbol_short!("met"),
+            symbol_short!("rew"),
+            symbol_short!("top"),
+            5u32,
+            15u32,
+            1500i128,
+        ),
+    );
+}
+
+#[test]
+fn test_set_config_emits_versioned_config_event() {
+    let (env, client, actors) = setup();
+
+    client.set_config(&actors.admin, &symbol_short!("critical"), &20, &200, &1000);
+
+    let events = env.events().all();
+    let (_, topics, data) = events.last().unwrap();
+
+    let topic_0: Symbol = topics.get(0).unwrap().try_into_val(&env).unwrap();
+    let topic_1: Symbol = topics.get(1).unwrap().try_into_val(&env).unwrap();
+    let topic_2: Symbol = topics.get(2).unwrap().try_into_val(&env).unwrap();
+    let event_data: (u32, i128, i128) = data.try_into_val(&env).unwrap();
+
+    assert_eq!(topic_0, EVENT_CONFIG_UPD);
+    assert_eq!(topic_1, EVENT_VERSION);
+    assert_eq!(topic_2, symbol_short!("critical"));
+    assert_eq!(event_data, (20u32, 200i128, 1000i128));
 }
 
 // ============================================================
