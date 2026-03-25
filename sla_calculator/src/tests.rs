@@ -60,6 +60,23 @@ fn test_defaults_exist_after_initialize() {
     assert_eq!(client.get_config(&symbol_short!("low")).threshold_minutes,     120);
 }
 
+#[test]
+fn test_result_schema_is_explicit_and_stable() {
+    let (_env, client, _actors) = setup();
+
+    let schema = client.get_result_schema();
+    assert_eq!(schema.version, symbol_short!("v1"));
+    assert_eq!(schema.schema_version, 1);
+    assert_eq!(schema.status_met, symbol_short!("met"));
+    assert_eq!(schema.status_violated, symbol_short!("viol"));
+    assert_eq!(schema.payment_reward, symbol_short!("rew"));
+    assert_eq!(schema.payment_penalty, symbol_short!("pen"));
+    assert_eq!(schema.rating_exceptional, symbol_short!("top"));
+    assert_eq!(schema.rating_excellent, symbol_short!("excel"));
+    assert_eq!(schema.rating_good, symbol_short!("good"));
+    assert_eq!(schema.rating_poor, symbol_short!("poor"));
+}
+
 // ============================================================
 // #28 – Operator management
 // ============================================================

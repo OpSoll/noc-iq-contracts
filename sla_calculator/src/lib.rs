@@ -22,6 +22,7 @@ const STATS_KEY:           Symbol = symbol_short!("STATS");    // #29
 const HISTORY_KEY:         Symbol = symbol_short!("HIST");
 const STORAGE_VERSION_KEY: Symbol = symbol_short!("VER");
 const STORAGE_VERSION:     u32    = 1;
+const RESULT_SCHEMA_VERSION: u32  = 1;
 
 // -----------------------------------------------------------------------
 // Events
@@ -69,6 +70,21 @@ pub struct SLAResult {
     pub amount:            i128,   // negative = penalty, positive = reward
     pub payment_type:      Symbol, // "rew" | "pen"
     pub rating:            Symbol, // "top" | "excel" | "good" | "poor"
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SLAResultSchema {
+    pub version: Symbol,
+    pub schema_version: u32,
+    pub status_met: Symbol,
+    pub status_violated: Symbol,
+    pub payment_reward: Symbol,
+    pub payment_penalty: Symbol,
+    pub rating_exceptional: Symbol,
+    pub rating_excellent: Symbol,
+    pub rating_good: Symbol,
+    pub rating_poor: Symbol,
 }
 
 /// #29 – Cumulative on-chain SLA performance metrics.
@@ -227,6 +243,24 @@ impl SLACalculatorContract {
     pub fn list_configs(env: Env) -> Result<Map<Symbol, SLAConfig>, SLAError> {
         Self::check_version(&env)?;
         env.storage().instance().get(&CONFIG_KEY).ok_or(SLAError::NotInitialized)
+    }
+
+    /// Returns the backend-facing result schema contract used by this version
+    /// of the SLA calculator.
+    pub fn get_result_schema(env: Env) -> Result<SLAResultSchema, SLAError> {
+        Self::check_version(&env)?;
+        Ok(SLAResultSchema {
+            version: symbol_short!("v1"),
+            schema_version: RESULT_SCHEMA_VERSION,
+            status_met: symbol_short!("met"),
+            status_violated: symbol_short!("viol"),
+            payment_reward: symbol_short!("rew"),
+            payment_penalty: symbol_short!("pen"),
+            rating_exceptional: symbol_short!("top"),
+            rating_excellent: symbol_short!("excel"),
+            rating_good: symbol_short!("good"),
+            rating_poor: symbol_short!("poor"),
+        })
     }
 
     // -------------------------------------------------------------------
