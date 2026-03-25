@@ -71,6 +71,20 @@ pub struct SLAResult {
     pub rating:            Symbol, // "top" | "excel" | "good" | "poor"
 }
 
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SLAConfigEntry {
+    pub severity: Symbol,
+    pub config: SLAConfig,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SLAConfigSnapshot {
+    pub version: Symbol,
+    pub entries: Vec<SLAConfigEntry>,
+}
+
 /// #29 – Cumulative on-chain SLA performance metrics.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -227,6 +241,29 @@ impl SLACalculatorContract {
     pub fn list_configs(env: Env) -> Result<Map<Symbol, SLAConfig>, SLAError> {
         Self::check_version(&env)?;
         env.storage().instance().get(&CONFIG_KEY).ok_or(SLAError::NotInitialized)
+    }
+
+    /// Returns a deterministic backend-friendly snapshot of all config values.
+    pub fn get_config_snapshot(env: Env) -> Result<SLAConfigSnapshot, SLAError> {
+        Self::check_version(&env)?;
+
+        let mut entries = Vec::new(&env);
+        let severities = [
+            symbol_short!("critical"),
+            symbol_short!("high"),
+            symbol_short!("medium"),
+            symbol_short!("low"),
+        ];
+
+        for severity in severities {
+            let config = Self::load_config(&env, &severity)?;
+            entries.push_back(SLAConfigEntry { severity, config });
+        }
+
+        Ok(SLAConfigSnapshot {
+            version: symbol_short!("v1"),
+            entries,
+        })
     }
 
     // -------------------------------------------------------------------

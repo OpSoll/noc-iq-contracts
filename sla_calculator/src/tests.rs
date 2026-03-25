@@ -60,6 +60,29 @@ fn test_defaults_exist_after_initialize() {
     assert_eq!(client.get_config(&symbol_short!("low")).threshold_minutes,     120);
 }
 
+#[test]
+fn test_config_snapshot_is_deterministic_and_complete() {
+    let (_env, client, _actors) = setup();
+
+    let snapshot = client.get_config_snapshot();
+    assert_eq!(snapshot.version, symbol_short!("v1"));
+    assert_eq!(snapshot.entries.len(), 4);
+
+    let critical = snapshot.entries.get(0).unwrap();
+    let high = snapshot.entries.get(1).unwrap();
+    let medium = snapshot.entries.get(2).unwrap();
+    let low = snapshot.entries.get(3).unwrap();
+
+    assert_eq!(critical.severity, symbol_short!("critical"));
+    assert_eq!(critical.config.threshold_minutes, 15);
+    assert_eq!(high.severity, symbol_short!("high"));
+    assert_eq!(high.config.threshold_minutes, 30);
+    assert_eq!(medium.severity, symbol_short!("medium"));
+    assert_eq!(medium.config.threshold_minutes, 60);
+    assert_eq!(low.severity, symbol_short!("low"));
+    assert_eq!(low.config.threshold_minutes, 120);
+}
+
 // ============================================================
 // #28 – Operator management
 // ============================================================

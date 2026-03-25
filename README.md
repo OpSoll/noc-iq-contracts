@@ -50,6 +50,7 @@ The current implementation includes:
 - admin-controlled config updates
 - operator-gated `calculate_sla`
 - read-only `calculate_sla_view`
+- backend-friendly `get_config_snapshot`
 - pause and unpause controls
 - cumulative SLA statistics
 - history retrieval and pruning
@@ -142,6 +143,7 @@ That dependency matters because:
 - SLA logic must stay aligned with backend expectations
 - result encoding must remain deterministic
 - API consumers in `noc-iq-fe` only see what `noc-iq-be` returns
+- config reads should prefer explicit snapshot-style contract views where stable ordering matters
 
 ## Current Limitations
 
