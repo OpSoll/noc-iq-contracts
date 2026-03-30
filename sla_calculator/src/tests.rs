@@ -1004,3 +1004,193 @@ fn test_prune_history_preserves_latest_records_accurately() {
         "Did not retain the correct recent record"
     );
 }
+
+// ============================================================
+// #54 – Config snapshot version hash
+// ============================================================
+
+#[test]
+fn test_config_version_hash_is_deterministic() {
+    let (_env, client, _actors) = setup();
+    let h1 = client.get_config_version_hash();
+    let h2 = client.get_config_version_hash();
+    assert_eq!(h1, h2);
+}
+
+#[test]
+fn test_config_version_hash_changes_on_update() {
+    let (_env, client, actors) = setup();
+    let before = client.get_config_version_hash();
+    client.set_config(&actors.admin, &symbol_short!("critical"), &20, &200, &1000);
+    let after = client.get_config_version_hash();
+    assert_ne!(before, after);
+}
+
+#[test]
+fn test_config_version_hash_stable_after_same_value_write() {
+    let (_env, client, actors) = setup();
+    let before = client.get_config_version_hash();
+    // Write the same values back – hash must not change
+    client.set_config(&actors.admin, &symbol_short!("critical"), &15, &100, &750);
+    let after = client.get_config_version_hash();
+    assert_eq!(before, after);
+}
+
+// ============================================================
+// #56 – Repeated config update regression tests
+// ============================================================
+
+#[test]
+fn test_repeated_config_updates_latest_wins() {
+    let (_env, client, actors) = setup();
+
+    client.set_config(&actors.admin, &symbol_short!("critical"), &10, &50, &500);
+    client.set_config(&actors.admin, &symbol_short!("critical"), &20, &100, &800);
+    client.set_config(&actors.admin, &symbol_short!("critical"), &30, &200, &1200);
+
+    let cfg = client.get_config(&symbol_short!("critical"));
+    assert_eq!(cfg.threshold_minutes, 30);
+    assert_eq!(cfg.penalty_per_minute, 200);
+    assert_eq!(cfg.reward_base, 1200);
+}
+
+#[test]
+fn test_repeated_config_updates_do_not_corrupt_calculation() {
+    let (_env, client, actors) = setup();
+
+    // Update critical config twice; final state: threshold=20, penalty=100, reward=800
+    client.set_config(&actors.admin, &symbol_short!("critical"), &10, &50, &500);
+    client.set_config(&actors.admin, &symbol_short!("critical"), &20, &100, &800);
+
+    // mttr=25 → 5 min over threshold=20 → penalty = 5 * 100 = 500
+    let result = client.calculate_sla(
+        &actors.operator,
+        &symbol_short!("RC001"),
+        &symbol_short!("critical"),
+        &25,
+    );
+    assert_eq!(result.status, symbol_short!("viol"));
+    assert_eq!(result.amount, -500);
+}
+
+#[test]
+fn test_repeated_config_updates_across_severities_are_independent() {
+    let (_env, client, actors) = setup();
+
+    client.set_config(&actors.admin, &symbol_short!("critical"), &5, &10, &100);
+    client.set_config(&actors.admin, &symbol_short!("high"), &5, &10, &100);
+
+    // medium and low must remain at their defaults
+    let medium = client.get_config(&symbol_short!("medium"));
+    let low = client.get_config(&symbol_short!("low"));
+    assert_eq!(medium.threshold_minutes, 60);
+    assert_eq!(low.threshold_minutes, 120);
+}
+
+// ============================================================
+// #50 – Canonical SLA vector snapshot export
+// ============================================================
+
+#[cfg(feature = "export-snapshots")]
+mod snapshots {
+    use super::*;
+    use std::fs;
+    use std::path::Path;
+
+    fn write_snapshot(name: &str, json: &str) {
+        let dir = Path::new("test_snapshots/tests");
+        fs::create_dir_all(dir).unwrap();
+        fs::write(dir.join(format!("{}.json", name)), json).unwrap();
+    }
+
+    #[test]
+    fn test_backend_parity_threshold_boundary_cases_snapshot() {
+        let (env, client, actors) = setup();
+        let cases = [
+            ("critical", 15u32, "met", "rew", "good", 750i128),
+            ("critical", 16, "viol", "pen", "poor", -100),
+            ("high", 30, "met", "rew", "good", 750),
+            ("high", 31, "viol", "pen", "poor", -50),
+            ("medium", 60, "met", "rew", "good", 750),
+            ("medium", 61, "viol", "pen", "poor", -25),
+            ("low", 120, "met", "rew", "good", 600),
+            ("low", 121, "viol", "pen", "poor", -10),
+        ];
+
+        let mut entries = Vec::new();
+        for (sev, mttr, status, ptype, rating, amount) in cases {
+            let result = client.calculate_sla_view(
+                &symbol(&env, "SNAP_B"),
+                &symbol(&env, sev),
+                &mttr,
+            );
+            assert_eq!(result.status, symbol(&env, status));
+            assert_eq!(result.payment_type, symbol(&env, ptype));
+            assert_eq!(result.rating, symbol(&env, rating));
+            assert_eq!(result.amount, amount);
+            entries.push(format!(
+                r#"{{"severity":"{sev}","mttr_minutes":{mttr},"status":"{status}","payment_type":"{ptype}","rating":"{rating}","amount":{amount}}}"#
+            ));
+        }
+        write_snapshot(
+            "test_backend_parity_threshold_boundary_cases",
+            &format!("[{}]", entries.join(",")),
+        );
+    }
+
+    #[test]
+    fn test_backend_parity_reward_tier_cases_snapshot() {
+        let (env, client, _actors) = setup();
+        let cases = [
+            ("critical", 7u32, "met", "rew", "top", 1500i128),
+            ("critical", 10, "met", "rew", "excel", 1125),
+            ("critical", 15, "met", "rew", "good", 750),
+            ("low", 59, "met", "rew", "top", 1200),
+            ("low", 89, "met", "rew", "excel", 900),
+            ("low", 120, "met", "rew", "good", 600),
+        ];
+
+        let mut entries = Vec::new();
+        for (sev, mttr, status, ptype, rating, amount) in cases {
+            let result = client.calculate_sla_view(
+                &symbol(&env, "SNAP_R"),
+                &symbol(&env, sev),
+                &mttr,
+            );
+            assert_eq!(result.status, symbol(&env, status));
+            assert_eq!(result.payment_type, symbol(&env, ptype));
+            assert_eq!(result.rating, symbol(&env, rating));
+            assert_eq!(result.amount, amount);
+            entries.push(format!(
+                r#"{{"severity":"{sev}","mttr_minutes":{mttr},"status":"{status}","payment_type":"{ptype}","rating":"{rating}","amount":{amount}}}"#
+            ));
+        }
+        write_snapshot(
+            "test_backend_parity_reward_tier_cases",
+            &format!("[{}]", entries.join(",")),
+        );
+    }
+
+    #[test]
+    fn test_config_snapshot_is_deterministic_and_complete_snapshot() {
+        let (_env, client, _actors) = setup();
+        let snap = client.get_config_snapshot();
+        assert_eq!(snap.entries.len(), 4);
+
+        let mut entries = Vec::new();
+        for i in 0..snap.entries.len() {
+            let e = snap.entries.get(i).unwrap();
+            entries.push(format!(
+                r#"{{"severity":"{}","threshold_minutes":{},"penalty_per_minute":{},"reward_base":{}}}"#,
+                ["critical", "high", "medium", "low"][i as usize],
+                e.config.threshold_minutes,
+                e.config.penalty_per_minute,
+                e.config.reward_base,
+            ));
+        }
+        write_snapshot(
+            "test_config_snapshot_is_deterministic_and_complete",
+            &format!("[{}]", entries.join(",")),
+        );
+    }
+}

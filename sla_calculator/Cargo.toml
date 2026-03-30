@@ -10,6 +10,9 @@ publish = false
 [lib]
 crate-type = ["cdylib"]
 
+[features]
+export-snapshots = []
+
 [dependencies]
 soroban-sdk = "21.0.0"
 

@@ -26,6 +26,34 @@ const RESULT_SCHEMA_VERSION: u32 = 1;
 
 // -----------------------------------------------------------------------
 // Events
+//
+// All events share the same topic layout:
+//   topic[0] = event name (Symbol constant below)
+//   topic[1] = event version ("v1")
+//   topic[2] = event-specific context (severity, caller address, etc.)
+//
+// Event payloads (data tuple field order):
+//
+//   sla_calc  → (outage_id: Symbol, status: Symbol, payment_type: Symbol,
+//                rating: Symbol, mttr_minutes: u32, threshold_minutes: u32,
+//                amount: i128)
+//
+//   cfg_upd   → (threshold_minutes: u32, penalty_per_minute: i128,
+//                reward_base: i128)
+//             context = severity Symbol
+//
+//   paused    → (true,)
+//   unpause   → (false,)
+//             context = caller Address
+//
+//   op_set    → (new_operator: Address,)
+//             context = caller Address
+//
+//   pruned    → (removed_count: u32, kept_count: u32)
+//             context = caller Address
+//
+// Versioning: breaking payload changes increment the version symbol (v2, …).
+// Additive fields are not considered breaking.
 // -----------------------------------------------------------------------
 const EVENT_SLA_CALC: Symbol = symbol_short!("sla_calc");
 const EVENT_CONFIG_UPD: Symbol = symbol_short!("cfg_upd");
@@ -333,6 +361,32 @@ impl SLACalculatorContract {
             version: symbol_short!("v1"),
             entries,
         })
+    }
+
+    /// Returns a deterministic config version hash so backend sync logic can
+    /// detect meaningful config changes cheaply.
+    ///
+    /// The hash is a simple additive checksum over all severity config fields
+    /// in canonical order (critical → high → medium → low).  It is stable
+    /// across repeated reads when config is unchanged and changes predictably
+    /// when any field is updated.
+    pub fn get_config_version_hash(env: Env) -> Result<u64, SLAError> {
+        Self::check_version(&env)?;
+        let severities = [
+            symbol_short!("critical"),
+            symbol_short!("high"),
+            symbol_short!("medium"),
+            symbol_short!("low"),
+        ];
+        let mut hash: u64 = 0;
+        for sev in severities {
+            let cfg = Self::load_config(&env, &sev)?;
+            hash = hash
+                .wrapping_add(cfg.threshold_minutes as u64)
+                .wrapping_add(cfg.penalty_per_minute as u64)
+                .wrapping_add(cfg.reward_base as u64);
+        }
+        Ok(hash)
     }
 
     pub fn get_result_schema(env: Env) -> Result<SLAResultSchema, SLAError> {
