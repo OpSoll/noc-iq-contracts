@@ -145,3 +145,100 @@ env.budget().reset_unlimited();
     );
 
 }
+
+// SC-079: read-only history/retention helpers
+
+#[test]
+fn test_get_config_count_returns_default_tier_count() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, SLACalculatorContract);
+    let client = SLACalculatorContractClient::new(&env, &contract_id);
+
+    let admin = soroban_sdk::Address::generate(&env);
+    client.initialize(&admin);
+
+    // initialize sets 4 default tiers: critical, high, medium, low
+    let count = client.get_config_count();
+    assert_eq!(count, 4);
+}
+
+#[test]
+fn test_get_storage_version_returns_current_version() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, SLACalculatorContract);
+    let client = SLACalculatorContractClient::new(&env, &contract_id);
+
+    let admin = soroban_sdk::Address::generate(&env);
+    client.initialize(&admin);
+
+    let version = client.get_storage_version();
+    assert_eq!(version, 1);
+}
+
+// SC-080: performance coverage for read-heavy helpers
+
+#[test]
+fn test_get_config_count_budget_is_reasonable() {
+    let env = Env::default();
+    env.budget().reset_unlimited();
+
+    let contract_id = env.register_contract(None, SLACalculatorContract);
+    let client = SLACalculatorContractClient::new(&env, &contract_id);
+
+    let admin = soroban_sdk::Address::generate(&env);
+    client.initialize(&admin).unwrap();
+
+    let before = env.budget().cpu_instruction_count();
+    let _ = client.get_config_count();
+    let after = env.budget().cpu_instruction_count();
+
+    assert!(
+        after - before < 100_000,
+        "get_config_count is too expensive: {} instructions",
+        after - before
+    );
+}
+
+#[test]
+fn test_get_config_budget_is_reasonable() {
+    let env = Env::default();
+    env.budget().reset_unlimited();
+
+    let contract_id = env.register_contract(None, SLACalculatorContract);
+    let client = SLACalculatorContractClient::new(&env, &contract_id);
+
+    let admin = soroban_sdk::Address::generate(&env);
+    client.initialize(&admin).unwrap();
+
+    let before = env.budget().cpu_instruction_count();
+    let _ = client.get_config(&symbol_short!("critical"));
+    let after = env.budget().cpu_instruction_count();
+
+    assert!(
+        after - before < 100_000,
+        "get_config read is too expensive: {} instructions",
+        after - before
+    );
+}
+
+#[test]
+fn test_list_configs_budget_is_reasonable() {
+    let env = Env::default();
+    env.budget().reset_unlimited();
+
+    let contract_id = env.register_contract(None, SLACalculatorContract);
+    let client = SLACalculatorContractClient::new(&env, &contract_id);
+
+    let admin = soroban_sdk::Address::generate(&env);
+    client.initialize(&admin).unwrap();
+
+    let before = env.budget().cpu_instruction_count();
+    let _ = client.list_configs();
+    let after = env.budget().cpu_instruction_count();
+
+    assert!(
+        after - before < 150_000,
+        "list_configs is too expensive: {} instructions",
+        after - before
+    );
+}

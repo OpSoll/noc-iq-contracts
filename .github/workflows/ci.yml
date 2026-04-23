@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    name: Test & Build
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+          targets: wasm32-unknown-unknown
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: sla_calculator
+
+      - name: Check formatting
+        run: cargo fmt --manifest-path sla_calculator/Cargo.toml -- --check
+
+      - name: Clippy (no-std compatible)
+        run: cargo clippy --manifest-path sla_calculator/Cargo.toml -- -D warnings
+
+      - name: Run tests
+        run: cargo test --manifest-path sla_calculator/Cargo.toml
+
+      # SC-077 — verify the crate compiles for the wasm32 target
+      - name: Build wasm32 target
+        run: cargo build --release --manifest-path sla_calculator/Cargo.toml --target wasm32-unknown-unknown
+
+      # SC-078 — surface contract size after release build
+      - name: Check contract binary size
+        run: |
+          WASM=sla_calculator/target/wasm32-unknown-unknown/release/sla_calculator.wasm
+          SIZE=$(wc -c < "$WASM")
+          echo "Contract size: ${SIZE} bytes"
+          MAX=102400   # 100 KB soft limit
+          if [ "$SIZE" -gt "$MAX" ]; then
+            echo "::warning::Contract binary (${SIZE}B) exceeds soft limit of ${MAX}B"
+          fi
