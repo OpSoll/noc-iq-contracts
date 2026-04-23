@@ -1194,3 +1194,164 @@ mod snapshots {
         );
     }
 }
+
+// ============================================================
+// #94 – Fixture helpers for repeated actor and contract setup
+// ============================================================
+
+/// Setup with a custom critical config applied on top of defaults.
+fn setup_with_critical(threshold: u32, penalty: i128, reward: i128) -> (Env, SLACalculatorContractClient<'static>, Actors) {
+    let (env, client, actors) = setup();
+    client.set_config(&actors.admin, &symbol_short!("critical"), &threshold, &penalty, &reward);
+    (env, client, actors)
+}
+
+/// Setup and perform one calculation, returning the result along with the env/client/actors.
+fn setup_after_calculation(severity: &str, mttr: u32) -> (Env, SLACalculatorContractClient<'static>, Actors) {
+    let (env, client, actors) = setup();
+    client
+        .calculate_sla(
+            &actors.operator,
+            &symbol(&env, "FIXTURE_ID"),
+            &symbol(&env, severity),
+            &mttr,
+        )
+        .unwrap();
+    (env, client, actors)
+}
+
+#[test]
+fn test_fixture_custom_critical_config_is_applied() {
+    let (_env, client, _actors) = setup_with_critical(10, 50, 500);
+    let cfg = client.get_config(&symbol_short!("critical"));
+    assert_eq!(cfg.threshold_minutes, 10);
+    assert_eq!(cfg.penalty_per_minute, 50);
+    assert_eq!(cfg.reward_base, 500);
+}
+
+#[test]
+fn test_fixture_after_calculation_history_has_one_entry() {
+    let (_env, client, _actors) = setup_after_calculation("critical", 5);
+    let history = client.get_history().unwrap();
+    assert_eq!(history.len(), 1);
+}
+
+#[test]
+fn test_fixture_after_calculation_stats_are_updated() {
+    let (_env, client, _actors) = setup_after_calculation("high", 35);
+    let stats = client.get_stats().unwrap();
+    assert_eq!(stats.total_calculations, 1);
+    assert_eq!(stats.total_violations, 1);
+}
+
+// ============================================================
+// #95 – Negative tests for malformed symbol inputs
+// ============================================================
+
+#[test]
+#[should_panic]
+fn test_calculate_sla_unknown_severity_panics() {
+    let (_env, client, actors) = setup();
+    // "xyz" is not a configured severity — ConfigNotFound maps to a panic in the client
+    client
+        .calculate_sla(
+            &actors.operator,
+            &symbol_short!("OUT001"),
+            &symbol_short!("xyz"),
+            &10,
+        )
+        .unwrap();
+}
+
+#[test]
+#[should_panic]
+fn test_get_config_unknown_severity_panics() {
+    let (_env, client, _actors) = setup();
+    // "CRIT" (uppercase) is not a valid severity key
+    client.get_config(&symbol_short!("CRIT"));
+}
+
+#[test]
+#[should_panic]
+fn test_calculate_sla_wrong_case_severity_panics() {
+    let (_env, client, actors) = setup();
+    // "HIGH" differs from configured "high"
+    client
+        .calculate_sla(
+            &actors.operator,
+            &symbol_short!("OUT002"),
+            &symbol_short!("HIGH"),
+            &10,
+        )
+        .unwrap();
+}
+#[test]
+#[should_panic]
+fn test_calculate_sla_view_unknown_severity_panics() {
+    let (env, client, _actors) = setup();
+    client.calculate_sla_view(
+        &symbol(&env, "VIEW001"),
+        &symbol_short!("unknown"),
+        &10,
+    );
+}
+// #96 – Backend-consumer smoke fixture (end-to-end sequence)
+// ============================================================
+
+#[test]
+fn test_backend_smoke_initialize_config_calculate_history_stats() {
+    // Step 1: initialize (via setup helper — admin + operator roles set, default configs loaded)
+    let (env, client, actors) = setup();
+
+    // Step 2: config read — verify a known severity is present
+    let critical_cfg = client.get_config(&symbol_short!("critical"));
+    assert_eq!(critical_cfg.threshold_minutes, 15);
+    assert!(critical_cfg.penalty_per_minute > 0);
+    assert!(critical_cfg.reward_base > 0);
+
+    // Step 3: calculate — operator submits an SLA result
+    let result = client
+        .calculate_sla(
+            &actors.operator,
+            &symbol(&env, "SMOKE_001"),
+            &symbol_short!("critical"),
+            &10,
+        )
+        .unwrap();
+    assert_eq!(result.status, symbol_short!("met"));
+
+    // Step 4: history read — the calculation appears in history
+    let history = client.get_history().unwrap();
+    assert_eq!(history.len(), 1);
+    assert_eq!(history.get(0).unwrap().outage_id, symbol(&env, "SMOKE_001"));
+
+    // Step 5: stats read — counters reflect the single met calculation
+    let stats = client.get_stats().unwrap();
+    assert_eq!(stats.total_calculations, 1);
+    assert_eq!(stats.total_violations, 0);
+    assert!(stats.total_rewards > 0);
+    assert_eq!(stats.total_penalties, 0);
+}
+
+#[test]
+fn test_backend_smoke_violation_path() {
+    let (env, client, actors) = setup();
+
+    // critical threshold is 15 min; 30 min exceeds it → violation
+    let result = client
+        .calculate_sla(
+            &actors.operator,
+            &symbol(&env, "SMOKE_002"),
+            &symbol_short!("critical"),
+            &30,
+        )
+        .unwrap();
+    assert_eq!(result.status, symbol_short!("viol"));
+    assert_eq!(result.payment_type, symbol_short!("pen"));
+    assert!(result.amount < 0);
+
+    let stats = client.get_stats().unwrap();
+    assert_eq!(stats.total_violations, 1);
+    assert_eq!(stats.total_rewards, 0);
+    assert!(stats.total_penalties > 0);
+}
