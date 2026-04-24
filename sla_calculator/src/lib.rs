@@ -139,6 +139,17 @@ pub struct SLAResultSchema {
     pub rating_poor: Symbol,
 }
 
+/// #60 – Single introspection call for backend clients.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ContractMetadata {
+    pub contract_name: Symbol,
+    pub storage_version: u32,
+    pub result_schema_version: u32,
+    pub supported_severities: Vec<Symbol>,
+    pub features: Vec<Symbol>,
+}
+
 /// #29 – Cumulative on-chain SLA performance metrics.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -229,6 +240,44 @@ impl SLACalculatorContract {
         env.storage().instance().set(&CONFIG_KEY, &configs);
         Self::write_version(&env);
         Ok(())
+    }
+
+    // -------------------------------------------------------------------
+    // #61 – Storage migration harness
+    // -------------------------------------------------------------------
+
+    /// Migrate storage from a previous version to the current one.
+    /// Must be called by admin after a contract upgrade that bumps STORAGE_VERSION.
+    /// Currently handles v0→v1 (first-time version stamp on legacy state).
+    pub fn migrate(env: Env, caller: Address) -> Result<(), SLAError> {
+        // Require admin without going through check_version (state may be unversioned)
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&ADMIN_KEY)
+            .ok_or(SLAError::NotInitialized)?;
+        if caller != admin {
+            return Err(SLAError::Unauthorized);
+        }
+
+        let stored: u32 = env
+            .storage()
+            .instance()
+            .get(&STORAGE_VERSION_KEY)
+            .unwrap_or(0);
+
+        if stored == STORAGE_VERSION {
+            // Already current – idempotent no-op
+            return Ok(());
+        }
+
+        // v0 → v1: stamp the version; all other fields were set by initialize
+        if stored == 0 {
+            Self::write_version(&env);
+            return Ok(());
+        }
+
+        Err(SLAError::VersionMismatch)
     }
 
     // -------------------------------------------------------------------
@@ -530,6 +579,31 @@ impl SLACalculatorContract {
         })
     }
 
+    /// #60 – Returns static contract capabilities for backend introspection.
+    pub fn get_contract_metadata(env: Env) -> Result<ContractMetadata, SLAError> {
+        Self::check_version(&env)?;
+        let mut severities = Vec::new(&env);
+        severities.push_back(symbol_short!("critical"));
+        severities.push_back(symbol_short!("high"));
+        severities.push_back(symbol_short!("medium"));
+        severities.push_back(symbol_short!("low"));
+
+        let mut features = Vec::new(&env);
+        features.push_back(symbol_short!("calc"));
+        features.push_back(symbol_short!("audit"));
+        features.push_back(symbol_short!("pause"));
+        features.push_back(symbol_short!("stats"));
+        features.push_back(symbol_short!("history"));
+
+        Ok(ContractMetadata {
+            contract_name: symbol_short!("sla_calc"),
+            storage_version: STORAGE_VERSION,
+            result_schema_version: RESULT_SCHEMA_VERSION,
+            supported_severities: severities,
+            features,
+        })
+    }
+
     // -------------------------------------------------------------------
     // #29 – Stats view
     // -------------------------------------------------------------------
@@ -806,5 +880,30 @@ impl SLACalculatorContract {
         }
 
         Ok(())
+    }
+
+    // -------------------------------------------------------------------
+    // SC-079: Read-only history / retention helpers
+    // -------------------------------------------------------------------
+
+    /// Returns the number of severity tiers currently configured.
+    /// Off-chain consumers can inspect retention state without fetching the full map.
+    pub fn get_config_count(env: Env) -> Result<u32, SLAError> {
+        Self::check_version(&env)?;
+        let configs: Map<Symbol, SLAConfig> = env
+            .storage()
+            .instance()
+            .get(&CONFIG_KEY)
+            .ok_or(SLAError::NotInitialized)?;
+        Ok(configs.len())
+    }
+
+    /// Returns the current storage schema version so off-chain consumers can
+    /// detect whether a migration has occurred.
+    pub fn get_storage_version(env: Env) -> Result<u32, SLAError> {
+        env.storage()
+            .instance()
+            .get(&STORAGE_VERSION_KEY)
+            .ok_or(SLAError::NotInitialized)
     }
 }
