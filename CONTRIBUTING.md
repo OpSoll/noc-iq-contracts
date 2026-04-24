@@ -488,4 +488,42 @@ Your contributions make NOCIQ better for everyone. We appreciate your time and e
 
 ---
 
+## SC-098: Security Review Checklist for Privileged Changes
+
+Use this checklist when reviewing PRs that touch governance, config, or storage.
+
+### Authentication & Authorisation
+
+- [ ] All privileged functions call `require_auth()` on the correct role (admin or operator)
+- [ ] No function bypasses the role check under any code path
+- [ ] Role assignments (admin, operator) can only be changed by the current admin
+- [ ] Pause/unpause state is checked at the top of every write function
+
+### Configuration Writes
+
+- [ ] `set_config` only accepts valid severity symbols (critical / high / medium / low)
+- [ ] `threshold_minutes`, `penalty_per_minute`, and `reward_base` are validated as non-zero positive values
+- [ ] Config changes emit a versioned `cfg_upd` event with the new values
+- [ ] After a config write the backend parity tests are re-run against the updated snapshot
+
+### Storage Changes
+
+- [ ] No new storage key is added without a corresponding version bump or migration path
+- [ ] Persistent storage writes are minimised — avoid writes on read-only queries
+- [ ] History pruning operations are admin-gated and emit a `pruned` event
+
+### Pause Behaviour
+
+- [ ] Contract-paused guard is present in all state-changing functions
+- [ ] Pause state is correctly persisted and readable via `get_paused`
+- [ ] Tests cover behaviour of every write function while paused
+
+### General
+
+- [ ] New public functions are added to the result schema or documented if they are read-only helpers
+- [ ] Any breaking change to `SLAResult` increments `RESULT_SCHEMA_VERSION`
+- [ ] CI passes: `cargo fmt --check`, `cargo clippy -- -D warnings`, `cargo test`, `wasm32` build
+
+---
+
 **Happy coding! 🚀**

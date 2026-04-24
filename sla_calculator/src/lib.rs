@@ -1,8 +1,8 @@
 #![no_std]
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, symbol_short, Address, Env, Map, Symbol,
-    Vec,
+    contract, contracterror, contractimpl, contracttype, symbol_short, Address, Env, Map, String,
+    Symbol, Vec,
 };
 
 #[contract]
@@ -16,8 +16,11 @@ mod tests;
 // -----------------------------------------------------------------------
 const ADMIN_KEY: Symbol = symbol_short!("ADMIN");
 const OPERATOR_KEY: Symbol = symbol_short!("OPERATOR"); // #28
+const PENDING_ADMIN_KEY: Symbol = symbol_short!("PADMIN"); // #63
+const PENDING_OP_KEY: Symbol = symbol_short!("POP"); // #64
 const CONFIG_KEY: Symbol = symbol_short!("CONFIG");
 const PAUSED_KEY: Symbol = symbol_short!("PAUSED"); // #27
+const PAUSE_INFO_KEY: Symbol = symbol_short!("PAUSEINF"); // #66
 const STATS_KEY: Symbol = symbol_short!("STATS"); // #29
 const HISTORY_KEY: Symbol = symbol_short!("HIST");
 const STORAGE_VERSION_KEY: Symbol = symbol_short!("VER");
@@ -61,6 +64,11 @@ const EVENT_PAUSED: Symbol = symbol_short!("paused"); // #27
 const EVENT_UNPAUSED: Symbol = symbol_short!("unpause"); // #27
 const EVENT_OP_SET: Symbol = symbol_short!("op_set"); // #28
 const EVENT_PRUNED: Symbol = symbol_short!("pruned");
+const EVENT_ADMIN_PROP: Symbol = symbol_short!("adm_prop"); // #63
+const EVENT_ADMIN_ACC: Symbol = symbol_short!("adm_acc"); // #63
+const EVENT_ADMIN_REN: Symbol = symbol_short!("adm_ren"); // #65
+const EVENT_OP_PROP: Symbol = symbol_short!("op_prop"); // #64
+const EVENT_OP_ACC: Symbol = symbol_short!("op_acc"); // #64
 const EVENT_VERSION: Symbol = symbol_short!("v1");
 
 // -----------------------------------------------------------------------
@@ -75,7 +83,8 @@ pub enum SLAError {
     Unauthorized = 3,
     ConfigNotFound = 4,
     VersionMismatch = 5,
-    ContractPaused = 6, // #27
+    ContractPaused = 6,    // #27
+    NoPendingTransfer = 7, // #63 #64
 }
 
 // -----------------------------------------------------------------------
@@ -130,6 +139,17 @@ pub struct SLAResultSchema {
     pub rating_poor: Symbol,
 }
 
+/// #60 – Single introspection call for backend clients.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ContractMetadata {
+    pub contract_name: Symbol,
+    pub storage_version: u32,
+    pub result_schema_version: u32,
+    pub supported_severities: Vec<Symbol>,
+    pub features: Vec<Symbol>,
+}
+
 /// #29 – Cumulative on-chain SLA performance metrics.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -138,6 +158,14 @@ pub struct SLAStats {
     pub total_violations: u64,
     pub total_rewards: i128,   // sum of all reward amounts paid out
     pub total_penalties: i128, // sum of all penalty amounts (stored positive)
+}
+
+/// #66 – Pause metadata stored when the contract is paused.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PauseInfo {
+    pub reason: String,
+    pub paused_at: u64, // ledger timestamp (seconds)
 }
 
 // -----------------------------------------------------------------------
@@ -215,6 +243,44 @@ impl SLACalculatorContract {
     }
 
     // -------------------------------------------------------------------
+    // #61 – Storage migration harness
+    // -------------------------------------------------------------------
+
+    /// Migrate storage from a previous version to the current one.
+    /// Must be called by admin after a contract upgrade that bumps STORAGE_VERSION.
+    /// Currently handles v0→v1 (first-time version stamp on legacy state).
+    pub fn migrate(env: Env, caller: Address) -> Result<(), SLAError> {
+        // Require admin without going through check_version (state may be unversioned)
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&ADMIN_KEY)
+            .ok_or(SLAError::NotInitialized)?;
+        if caller != admin {
+            return Err(SLAError::Unauthorized);
+        }
+
+        let stored: u32 = env
+            .storage()
+            .instance()
+            .get(&STORAGE_VERSION_KEY)
+            .unwrap_or(0);
+
+        if stored == STORAGE_VERSION {
+            // Already current – idempotent no-op
+            return Ok(());
+        }
+
+        // v0 → v1: stamp the version; all other fields were set by initialize
+        if stored == 0 {
+            Self::write_version(&env);
+            return Ok(());
+        }
+
+        Err(SLAError::VersionMismatch)
+    }
+
+    // -------------------------------------------------------------------
     // Role queries
     // -------------------------------------------------------------------
 
@@ -256,28 +322,130 @@ impl SLACalculatorContract {
     }
 
     // -------------------------------------------------------------------
-    // #27 – Pause / Unpause (admin only)
+    // #63 – Two-step admin transfer
     // -------------------------------------------------------------------
 
-    /// Pause the contract; `calculate_sla` will be blocked until unpaused.
+    /// Propose a new admin. The current admin initiates; the new admin must call `accept_admin`.
+    pub fn propose_admin(env: Env, caller: Address, new_admin: Address) -> Result<(), SLAError> {
+        Self::check_version(&env)?;
+        Self::require_admin(&env, &caller)?;
+        env.storage().instance().set(&PENDING_ADMIN_KEY, &new_admin);
+        env.events()
+            .publish((EVENT_ADMIN_PROP, EVENT_VERSION, caller), (new_admin,));
+        Ok(())
+    }
+
+    /// Accept a pending admin transfer. Must be called by the proposed new admin.
+    /// On success the caller becomes admin and the pending proposal is cleared.
+    pub fn accept_admin(env: Env, caller: Address) -> Result<(), SLAError> {
+        Self::check_version(&env)?;
+        let pending: Address = env
+            .storage()
+            .instance()
+            .get(&PENDING_ADMIN_KEY)
+            .ok_or(SLAError::NoPendingTransfer)?;
+        if caller != pending {
+            return Err(SLAError::Unauthorized);
+        }
+        env.storage().instance().set(&ADMIN_KEY, &caller);
+        env.storage().instance().remove(&PENDING_ADMIN_KEY);
+        env.events()
+            .publish((EVENT_ADMIN_ACC, EVENT_VERSION, caller), ());
+        Ok(())
+    }
+
+    /// Returns the pending admin address, if any.
+    pub fn get_pending_admin(env: Env) -> Result<Option<Address>, SLAError> {
+        Self::check_version(&env)?;
+        Ok(env.storage().instance().get(&PENDING_ADMIN_KEY))
+    }
+
+    // -------------------------------------------------------------------
+    // #64 – Two-step operator handoff
+    // -------------------------------------------------------------------
+
+    /// Propose a new operator. The current admin initiates; the new operator must call `accept_operator`.
+    pub fn propose_operator(
+        env: Env,
+        caller: Address,
+        new_operator: Address,
+    ) -> Result<(), SLAError> {
+        Self::check_version(&env)?;
+        Self::require_admin(&env, &caller)?;
+        env.storage()
+            .instance()
+            .set(&PENDING_OP_KEY, &new_operator);
+        env.events()
+            .publish((EVENT_OP_PROP, EVENT_VERSION, caller), (new_operator,));
+        Ok(())
+    }
+
+    /// Accept a pending operator handoff. Must be called by the proposed new operator.
+    pub fn accept_operator(env: Env, caller: Address) -> Result<(), SLAError> {
+        Self::check_version(&env)?;
+        let pending: Address = env
+            .storage()
+            .instance()
+            .get(&PENDING_OP_KEY)
+            .ok_or(SLAError::NoPendingTransfer)?;
+        if caller != pending {
+            return Err(SLAError::Unauthorized);
+        }
+        env.storage().instance().set(&OPERATOR_KEY, &caller);
+        env.storage().instance().remove(&PENDING_OP_KEY);
+        env.events()
+            .publish((EVENT_OP_ACC, EVENT_VERSION, caller), ());
+        Ok(())
+    }
+
+    /// Returns the pending operator address, if any.
+    pub fn get_pending_operator(env: Env) -> Result<Option<Address>, SLAError> {
+        Self::check_version(&env)?;
+        Ok(env.storage().instance().get(&PENDING_OP_KEY))
+    }
+
+    // -------------------------------------------------------------------
+    // #65 – Admin renounce
+    // -------------------------------------------------------------------
+
+    /// Permanently renounce admin authority. This is irreversible: no admin will
+    /// exist after this call and admin-gated functions will be permanently locked.
+    /// Any pending admin proposal is also cleared.
+    pub fn renounce_admin(env: Env, caller: Address) -> Result<(), SLAError> {
+        Self::check_version(&env)?;
+        Self::require_admin(&env, &caller)?;
+        env.storage().instance().remove(&ADMIN_KEY);
+        env.storage().instance().remove(&PENDING_ADMIN_KEY);
+        env.events()
+            .publish((EVENT_ADMIN_REN, EVENT_VERSION, caller), ());
+        Ok(())
+    }
+
+    /// Pause the contract with a reason and timestamp.
+    /// `calculate_sla` will be blocked until unpaused.
     /// Emits a `paused` event.
-    pub fn pause(env: Env, caller: Address) -> Result<(), SLAError> {
+    pub fn pause(env: Env, caller: Address, reason: String) -> Result<(), SLAError> {
         Self::check_version(&env)?;
         Self::require_admin(&env, &caller)?;
 
+        let paused_at = env.ledger().timestamp();
         env.storage().instance().set(&PAUSED_KEY, &true);
+        env.storage()
+            .instance()
+            .set(&PAUSE_INFO_KEY, &PauseInfo { reason, paused_at });
         env.events()
             .publish((EVENT_PAUSED, EVENT_VERSION, caller), (true,));
         Ok(())
     }
 
-    /// Unpause the contract.
+    /// Unpause the contract. Clears pause metadata.
     /// Emits an `unpause` event.
     pub fn unpause(env: Env, caller: Address) -> Result<(), SLAError> {
         Self::check_version(&env)?;
         Self::require_admin(&env, &caller)?;
 
         env.storage().instance().set(&PAUSED_KEY, &false);
+        env.storage().instance().remove(&PAUSE_INFO_KEY);
         env.events()
             .publish((EVENT_UNPAUSED, EVENT_VERSION, caller), (false,));
         Ok(())
@@ -287,6 +455,12 @@ impl SLACalculatorContract {
     pub fn is_paused(env: Env) -> Result<bool, SLAError> {
         Self::check_version(&env)?;
         Ok(env.storage().instance().get(&PAUSED_KEY).unwrap_or(false))
+    }
+
+    /// Returns pause metadata (reason + timestamp) if currently paused, else None.
+    pub fn get_pause_info(env: Env) -> Result<Option<PauseInfo>, SLAError> {
+        Self::check_version(&env)?;
+        Ok(env.storage().instance().get(&PAUSE_INFO_KEY))
     }
 
     // -------------------------------------------------------------------
@@ -402,6 +576,31 @@ impl SLACalculatorContract {
             rating_excellent: symbol_short!("excel"),
             rating_good: symbol_short!("good"),
             rating_poor: symbol_short!("poor"),
+        })
+    }
+
+    /// #60 – Returns static contract capabilities for backend introspection.
+    pub fn get_contract_metadata(env: Env) -> Result<ContractMetadata, SLAError> {
+        Self::check_version(&env)?;
+        let mut severities = Vec::new(&env);
+        severities.push_back(symbol_short!("critical"));
+        severities.push_back(symbol_short!("high"));
+        severities.push_back(symbol_short!("medium"));
+        severities.push_back(symbol_short!("low"));
+
+        let mut features = Vec::new(&env);
+        features.push_back(symbol_short!("calc"));
+        features.push_back(symbol_short!("audit"));
+        features.push_back(symbol_short!("pause"));
+        features.push_back(symbol_short!("stats"));
+        features.push_back(symbol_short!("history"));
+
+        Ok(ContractMetadata {
+            contract_name: symbol_short!("sla_calc"),
+            storage_version: STORAGE_VERSION,
+            result_schema_version: RESULT_SCHEMA_VERSION,
+            supported_severities: severities,
+            features,
         })
     }
 
@@ -681,5 +880,30 @@ impl SLACalculatorContract {
         }
 
         Ok(())
+    }
+
+    // -------------------------------------------------------------------
+    // SC-079: Read-only history / retention helpers
+    // -------------------------------------------------------------------
+
+    /// Returns the number of severity tiers currently configured.
+    /// Off-chain consumers can inspect retention state without fetching the full map.
+    pub fn get_config_count(env: Env) -> Result<u32, SLAError> {
+        Self::check_version(&env)?;
+        let configs: Map<Symbol, SLAConfig> = env
+            .storage()
+            .instance()
+            .get(&CONFIG_KEY)
+            .ok_or(SLAError::NotInitialized)?;
+        Ok(configs.len())
+    }
+
+    /// Returns the current storage schema version so off-chain consumers can
+    /// detect whether a migration has occurred.
+    pub fn get_storage_version(env: Env) -> Result<u32, SLAError> {
+        env.storage()
+            .instance()
+            .get(&STORAGE_VERSION_KEY)
+            .ok_or(SLAError::NotInitialized)
     }
 }
