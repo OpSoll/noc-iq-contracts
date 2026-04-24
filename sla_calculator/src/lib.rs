@@ -540,10 +540,11 @@ impl SLACalculatorContract {
     /// Returns a deterministic config version hash so backend sync logic can
     /// detect meaningful config changes cheaply.
     ///
-    /// The hash is a simple additive checksum over all severity config fields
-    /// in canonical order (critical → high → medium → low).  It is stable
-    /// across repeated reads when config is unchanged and changes predictably
-    /// when any field is updated.
+    /// The hash uses a polynomial rolling hash with a prime base and modulus
+    /// to provide strong collision resistance while remaining deterministic.
+    /// It processes all severity config fields in canonical order 
+    /// (critical → high → medium → low) and is stable across repeated reads
+    /// when config is unchanged.
     pub fn get_config_version_hash(env: Env) -> Result<u64, SLAError> {
         Self::check_version(&env)?;
         let severities = [
@@ -552,14 +553,48 @@ impl SLACalculatorContract {
             symbol_short!("medium"),
             symbol_short!("low"),
         ];
-        let mut hash: u64 = 0;
+        
+        // Polynomial rolling hash parameters for good collision resistance
+        const BASE: u64 = 91138233; // Large prime number
+        const MODULUS: u64 = (1u64 << 63) - 25; // Large prime (Mersenne-like)
+        
+        let mut hash: u64 = 1; // Start with non-zero seed
+        let mut power: u64 = 1;
+        
         for sev in severities {
             let cfg = Self::load_config(&env, &sev)?;
-            hash = hash
+            
+            // Mix each field with position-dependent weights
+            let field_hash = hash
+                .wrapping_mul(BASE)
                 .wrapping_add(cfg.threshold_minutes as u64)
+                .wrapping_mul(power)
+                % MODULUS;
+            
+            hash = field_hash;
+            power = power.wrapping_mul(BASE) % MODULUS;
+            
+            // Add penalty_per_minute with different weight
+            hash = hash
+                .wrapping_mul(BASE)
                 .wrapping_add(cfg.penalty_per_minute as u64)
-                .wrapping_add(cfg.reward_base as u64);
+                .wrapping_mul(power)
+                % MODULUS;
+            
+            power = power.wrapping_mul(BASE) % MODULUS;
+            
+            // Add reward_base with different weight
+            hash = hash
+                .wrapping_mul(BASE)
+                .wrapping_add(cfg.reward_base as u64)
+                .wrapping_mul(power)
+                % MODULUS;
+            
+            power = power.wrapping_mul(BASE) % MODULUS;
         }
+        
+        // Final mixing to improve distribution
+        hash = hash.wrapping_mul(BASE).wrapping_add(0x9e3779b97f4a7c15u64) % MODULUS;
         Ok(hash)
     }
 

@@ -1036,6 +1036,113 @@ fn test_config_version_hash_stable_after_same_value_write() {
     assert_eq!(before, after);
 }
 
+#[test]
+fn test_config_version_hash_collision_resistance() {
+    let (_env, client, actors) = setup();
+    
+    // Get initial hash
+    let initial_hash = client.get_config_version_hash();
+    
+    // Create a different config that would have same additive checksum
+    // Original critical: threshold=15, penalty=100, reward=750 (sum=865)
+    // New critical: threshold=865, penalty=0, reward=0 (sum=865)
+    client.set_config(&actors.admin, &symbol_short!("critical"), &865, &0, &0);
+    let collision_attempt_hash = client.get_config_version_hash();
+    
+    // Hash should be different despite same additive sum
+    assert_ne!(initial_hash, collision_attempt_hash, 
+        "Hash should resist collision from additive checksum equivalence");
+    
+    // Restore original config
+    client.set_config(&actors.admin, &symbol_short!("critical"), &15, &100, &750);
+    let restored_hash = client.get_config_version_hash();
+    assert_eq!(initial_hash, restored_hash, 
+        "Hash should return to original value after restoring config");
+}
+
+#[test]
+fn test_config_version_hash_field_order_sensitivity() {
+    let (_env, client, actors) = setup();
+    
+    // Test that changing different fields produces different hashes
+    let original_hash = client.get_config_version_hash();
+    
+    // Change threshold only
+    client.set_config(&actors.admin, &symbol_short!("high"), &25, &50, &750);
+    let threshold_hash = client.get_config_version_hash();
+    assert_ne!(original_hash, threshold_hash);
+    
+    // Reset and change penalty only  
+    client.set_config(&actors.admin, &symbol_short!("high"), &30, &60, &750);
+    let penalty_hash = client.get_config_version_hash();
+    assert_ne!(original_hash, penalty_hash);
+    assert_ne!(threshold_hash, penalty_hash);
+    
+    // Reset and change reward only
+    client.set_config(&actors.admin, &symbol_short!("high"), &30, &50, &800);
+    let reward_hash = client.get_config_version_hash();
+    assert_ne!(original_hash, reward_hash);
+    assert_ne!(threshold_hash, reward_hash);
+    assert_ne!(penalty_hash, reward_hash);
+    
+    // Restore original
+    client.set_config(&actors.admin, &symbol_short!("high"), &30, &50, &750);
+    let restored_hash = client.get_config_version_hash();
+    assert_eq!(original_hash, restored_hash);
+}
+
+#[test]
+fn test_config_version_hash_severity_isolation() {
+    let (_env, client, actors) = setup();
+    
+    let original_hash = client.get_config_version_hash();
+    
+    // Change only critical severity
+    client.set_config(&actors.admin, &symbol_short!("critical"), &20, &200, &1000);
+    let critical_changed_hash = client.get_config_version_hash();
+    assert_ne!(original_hash, critical_changed_hash);
+    
+    // Change only high severity (restore critical first)
+    client.set_config(&actors.admin, &symbol_short!("critical"), &15, &100, &750);
+    client.set_config(&actors.admin, &symbol_short!("high"), &35, &55, &775);
+    let high_changed_hash = client.get_config_version_hash();
+    assert_ne!(original_hash, high_changed_hash);
+    assert_ne!(critical_changed_hash, high_changed_hash);
+    
+    // Both changes should produce yet another hash
+    client.set_config(&actors.admin, &symbol_short!("critical"), &20, &200, &1000);
+    let both_changed_hash = client.get_config_version_hash();
+    assert_ne!(original_hash, both_changed_hash);
+    assert_ne!(critical_changed_hash, both_changed_hash);
+    assert_ne!(high_changed_hash, both_changed_hash);
+}
+
+#[test]
+fn test_config_version_hash_distribution() {
+    let (_env, client, actors) = setup();
+    
+    // Test hash changes are well-distributed by making multiple small changes
+    let mut hashes = Vec::new(&_env);
+    
+    // Collect hashes from various config states
+    for i in 1..=10 {
+        client.set_config(&actors.admin, &symbol_short!("critical"), &(15 + i), &100, &750);
+        let hash = client.get_config_version_hash();
+        hashes.push_back(hash);
+    }
+    
+    // Verify all hashes are unique
+    for i in 0..hashes.len() {
+        for j in (i + 1)..hashes.len() {
+            assert_ne!(hashes.get(i), hashes.get(j), 
+                "Hashes should be unique for different config values");
+        }
+    }
+    
+    // Restore original config
+    client.set_config(&actors.admin, &symbol_short!("critical"), &15, &100, &750);
+}
+
 // ============================================================
 // #56 – Repeated config update regression tests
 // ============================================================
