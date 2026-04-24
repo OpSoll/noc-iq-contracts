@@ -756,4 +756,29 @@ impl SLACalculatorContract {
 
         Ok(())
     }
+
+    // -------------------------------------------------------------------
+    // SC-079: Read-only history / retention helpers
+    // -------------------------------------------------------------------
+
+    /// Returns the number of severity tiers currently configured.
+    /// Off-chain consumers can inspect retention state without fetching the full map.
+    pub fn get_config_count(env: Env) -> Result<u32, SLAError> {
+        Self::check_version(&env)?;
+        let configs: Map<Symbol, SLAConfig> = env
+            .storage()
+            .instance()
+            .get(&CONFIG_KEY)
+            .ok_or(SLAError::NotInitialized)?;
+        Ok(configs.len())
+    }
+
+    /// Returns the current storage schema version so off-chain consumers can
+    /// detect whether a migration has occurred.
+    pub fn get_storage_version(env: Env) -> Result<u32, SLAError> {
+        env.storage()
+            .instance()
+            .get(&STORAGE_VERSION_KEY)
+            .ok_or(SLAError::NotInitialized)
+    }
 }
