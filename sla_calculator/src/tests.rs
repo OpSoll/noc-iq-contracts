@@ -1194,3 +1194,131 @@ mod snapshots {
         );
     }
 }
+
+// ============================================================
+// #60 – Contract metadata / capabilities view
+// ============================================================
+
+#[test]
+fn test_get_contract_metadata_returns_expected_fields() {
+    let (_env, client, _actors) = setup();
+    let meta = client.get_contract_metadata();
+    assert_eq!(meta.contract_name, symbol_short!("sla_calc"));
+    assert_eq!(meta.storage_version, 1);
+    assert_eq!(meta.result_schema_version, 1);
+    assert_eq!(meta.supported_severities.len(), 4);
+    assert_eq!(meta.features.len(), 5);
+}
+
+#[test]
+fn test_get_contract_metadata_severities_are_canonical() {
+    let (_env, client, _actors) = setup();
+    let meta = client.get_contract_metadata();
+    assert_eq!(meta.supported_severities.get(0).unwrap(), symbol_short!("critical"));
+    assert_eq!(meta.supported_severities.get(1).unwrap(), symbol_short!("high"));
+    assert_eq!(meta.supported_severities.get(2).unwrap(), symbol_short!("medium"));
+    assert_eq!(meta.supported_severities.get(3).unwrap(), symbol_short!("low"));
+}
+
+#[test]
+fn test_get_contract_metadata_is_deterministic() {
+    let (_env, client, _actors) = setup();
+    let m1 = client.get_contract_metadata();
+    let m2 = client.get_contract_metadata();
+    assert_eq!(m1.storage_version, m2.storage_version);
+    assert_eq!(m1.result_schema_version, m2.result_schema_version);
+    assert_eq!(m1.contract_name, m2.contract_name);
+}
+
+// ============================================================
+// #61 – Storage migration harness
+// ============================================================
+
+#[test]
+fn test_migrate_is_idempotent_when_already_current() {
+    let (_env, client, actors) = setup();
+    // Already at v1 – migrate should succeed without error
+    client.migrate(&actors.admin);
+    client.migrate(&actors.admin);
+    // Contract still functional
+    assert_eq!(client.get_admin(), actors.admin);
+}
+
+#[test]
+#[should_panic]
+fn test_migrate_rejected_for_non_admin() {
+    let (_env, client, actors) = setup();
+    client.migrate(&actors.stranger);
+}
+
+#[test]
+#[should_panic]
+fn test_check_version_rejects_version_mismatch() {
+    // Simulate a future version stored in state by writing a different version
+    // directly, then calling any versioned endpoint.
+    let env = Env::default();
+    let cid = env.register_contract(None, SLACalculatorContract);
+    let client = SLACalculatorContractClient::new(&env, &cid);
+    let admin = soroban_sdk::Address::generate(&env);
+    let op = soroban_sdk::Address::generate(&env);
+    client.initialize(&admin, &op);
+
+    // Manually overwrite the stored version to simulate a future schema
+    env.as_contract(&cid, || {
+        env.storage()
+            .instance()
+            .set(&STORAGE_VERSION_KEY, &99u32);
+    });
+
+    // Any versioned call must now panic with VersionMismatch
+    client.get_admin();
+}
+
+// ============================================================
+// #62 – Unknown-severity rejection
+// ============================================================
+
+#[test]
+#[should_panic]
+fn test_calculate_sla_rejects_unknown_severity() {
+    let (env, client, actors) = setup();
+    client.calculate_sla(
+        &actors.operator,
+        &symbol_short!("UNK001"),
+        &Symbol::new(&env, "unknown"),
+        &10,
+    );
+}
+
+#[test]
+#[should_panic]
+fn test_calculate_sla_view_rejects_unknown_severity() {
+    let (env, client, _actors) = setup();
+    client.calculate_sla_view(
+        &symbol_short!("UNK002"),
+        &Symbol::new(&env, "unknown"),
+        &10,
+    );
+}
+
+#[test]
+#[should_panic]
+fn test_get_config_rejects_unknown_severity() {
+    let (env, client, _actors) = setup();
+    client.get_config(&Symbol::new(&env, "unknown"));
+}
+
+#[test]
+#[should_panic]
+fn test_set_config_then_calculate_unknown_severity_still_rejects_other_unknown() {
+    // Even after adding a custom severity via set_config, a different unknown still fails
+    let (env, client, actors) = setup();
+    client.set_config(&actors.admin, &Symbol::new(&env, "custom"), &10, &50, &500);
+    // "bogus" was never configured
+    client.calculate_sla(
+        &actors.operator,
+        &symbol_short!("UNK003"),
+        &Symbol::new(&env, "bogus"),
+        &5,
+    );
+}
