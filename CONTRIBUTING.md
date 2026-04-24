@@ -122,6 +122,7 @@ git checkout -b docs/stellar-guide
 - Add tests for new functionality
 - Update documentation as needed
 - Keep commits focused and atomic
+- Update `CHANGELOG.md` for any interface-affecting changes (added/changed/removed public functions)
 
 ### 3. Test Your Changes
 
