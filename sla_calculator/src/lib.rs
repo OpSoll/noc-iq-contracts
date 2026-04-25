@@ -64,6 +64,7 @@ const EVENT_PAUSED: Symbol = symbol_short!("paused"); // #27
 const EVENT_UNPAUSED: Symbol = symbol_short!("unpause"); // #27
 const EVENT_OP_SET: Symbol = symbol_short!("op_set"); // #28
 const EVENT_PRUNED: Symbol = symbol_short!("pruned");
+const EVENT_PRUNED_AGE: Symbol = symbol_short!("pruned_a"); // SC-063
 const EVENT_ADMIN_PROP: Symbol = symbol_short!("adm_prop"); // #63
 const EVENT_ADMIN_ACC: Symbol = symbol_short!("adm_acc"); // #63
 const EVENT_ADMIN_REN: Symbol = symbol_short!("adm_ren"); // #65
@@ -112,6 +113,7 @@ pub struct SLAResult {
     pub amount: i128,         // negative = penalty, positive = reward
     pub payment_type: Symbol, // "rew" | "pen"
     pub rating: Symbol,       // "top" | "excel" | "good" | "poor"
+    pub recorded_at: u64,     // SC-063: ledger timestamp at calculation time
 }
 
 #[contracttype]
@@ -675,8 +677,8 @@ impl SLACalculatorContract {
         // We bypass pause and operator checks to allow continuous, public verification
         let cfg = Self::load_config(&env, &severity)?;
 
-        // Delegate to pure internal math
-        Ok(Self::compute_result(outage_id, mttr_minutes, &cfg))
+        // Delegate to pure internal math; recorded_at=0 for view-only calls
+        Ok(Self::compute_result(outage_id, mttr_minutes, &cfg, 0))
     }
 
     // -------------------------------------------------------------------
@@ -695,7 +697,7 @@ impl SLACalculatorContract {
         Self::require_operator(&env, &caller)?; // #28
 
         let cfg = Self::load_config(&env, &severity)?;
-        let result = Self::compute_result(outage_id.clone(), mttr_minutes, &cfg);
+        let result = Self::compute_result(outage_id.clone(), mttr_minutes, &cfg, env.ledger().timestamp());
         let mut history: Vec<SLAResult> = env
             .storage()
             .instance()
@@ -723,8 +725,9 @@ impl SLACalculatorContract {
     // Private helpers
     // -------------------------------------------------------------------
 
-    /// Pure helper to generate the SLAResult deterministically
-    fn compute_result(outage_id: Symbol, mttr_minutes: u32, cfg: &SLAConfig) -> SLAResult {
+    /// Pure helper to generate the SLAResult deterministically.
+    /// `recorded_at` is the ledger timestamp at call time (0 in view/audit mode).
+    fn compute_result(outage_id: Symbol, mttr_minutes: u32, cfg: &SLAConfig, recorded_at: u64) -> SLAResult {
         let threshold = cfg.threshold_minutes;
 
         // Case 1: SLA violated → penalty
@@ -740,6 +743,7 @@ impl SLACalculatorContract {
                 amount: -penalty,
                 payment_type: symbol_short!("pen"),
                 rating: symbol_short!("poor"),
+                recorded_at,
             }
         } else {
             // Case 2: SLA met → reward
@@ -767,6 +771,7 @@ impl SLACalculatorContract {
                 amount: reward,
                 payment_type: symbol_short!("rew"),
                 rating,
+                recorded_at,
             }
         }
     }
@@ -857,41 +862,37 @@ impl SLACalculatorContract {
         }
 
         // Severity-specific validation to ensure logical consistency
-        match severity.to_string().as_str() {
-            "critical" => {
-                // Critical should have shortest thresholds and highest penalties
-                if threshold_minutes > 60 {
-                    return Err(SLAError::InvalidThreshold);
-                }
-                if penalty_per_minute < 50 {
-                    return Err(SLAError::InvalidPenalty);
-                }
+        if *severity == symbol_short!("critical") {
+            // Critical should have shortest thresholds and highest penalties
+            if threshold_minutes > 60 {
+                return Err(SLAError::InvalidThreshold);
             }
-            "high" => {
-                // High severity thresholds should be reasonable
-                if threshold_minutes > 120 {
-                    return Err(SLAError::InvalidThreshold);
-                }
-                if penalty_per_minute < 25 {
-                    return Err(SLAError::InvalidPenalty);
-                }
+            if penalty_per_minute < 50 {
+                return Err(SLAError::InvalidPenalty);
             }
-            "medium" => {
-                // Medium severity thresholds
-                if threshold_minutes > 240 {
-                    return Err(SLAError::InvalidThreshold);
-                }
-                if penalty_per_minute < 10 {
-                    return Err(SLAError::InvalidPenalty);
-                }
+        } else if *severity == symbol_short!("high") {
+            // High severity thresholds should be reasonable
+            if threshold_minutes > 120 {
+                return Err(SLAError::InvalidThreshold);
             }
-            "low" => {
-                // Low severity can have longer thresholds but lower penalties
-                if penalty_per_minute > 100 {
-                    return Err(SLAError::InvalidPenalty);
-                }
+            if penalty_per_minute < 25 {
+                return Err(SLAError::InvalidPenalty);
             }
-            _ => return Err(SLAError::InvalidSeverity),
+        } else if *severity == symbol_short!("medium") {
+            // Medium severity thresholds
+            if threshold_minutes > 240 {
+                return Err(SLAError::InvalidThreshold);
+            }
+            if penalty_per_minute < 10 {
+                return Err(SLAError::InvalidPenalty);
+            }
+        } else if *severity == symbol_short!("low") {
+            // Low severity can have longer thresholds but lower penalties
+            if penalty_per_minute > 100 {
+                return Err(SLAError::InvalidPenalty);
+            }
+        } else {
+            return Err(SLAError::InvalidSeverity);
         }
 
         Ok(())
@@ -992,6 +993,52 @@ impl SLACalculatorContract {
             env.events().publish(
                 (EVENT_PRUNED, EVENT_VERSION, caller),
                 (remove_count, keep_latest),
+            );
+        }
+
+        Ok(())
+    }
+
+    /// SC-063 – Prune history entries older than `min_age_seconds` before the
+    /// current ledger timestamp.  Entries with `recorded_at == 0` (view-mode
+    /// results that were never stored with a real timestamp) are always kept.
+    /// Admin-only.  Emits a `pruned_a` event.
+    pub fn prune_history_by_age(
+        env: Env,
+        caller: Address,
+        min_age_seconds: u64,
+    ) -> Result<(), SLAError> {
+        Self::check_version(&env)?;
+        Self::require_admin(&env, &caller)?;
+
+        let now = env.ledger().timestamp();
+        let cutoff = now.saturating_sub(min_age_seconds);
+
+        let history: Vec<SLAResult> = env
+            .storage()
+            .instance()
+            .get(&HISTORY_KEY)
+            .unwrap_or_else(|| Vec::new(&env));
+
+        let mut new_history = Vec::new(&env);
+        let mut removed: u32 = 0;
+
+        for i in 0..history.len() {
+            let entry = history.get(i).unwrap();
+            // Keep entries that are recent enough
+            if entry.recorded_at >= cutoff {
+                new_history.push_back(entry);
+            } else {
+                removed += 1;
+            }
+        }
+
+        if removed > 0 {
+            let kept = new_history.len();
+            env.storage().instance().set(&HISTORY_KEY, &new_history);
+            env.events().publish(
+                (EVENT_PRUNED_AGE, EVENT_VERSION, caller),
+                (removed, kept),
             );
         }
 
