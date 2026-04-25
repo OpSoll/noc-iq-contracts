@@ -26,6 +26,7 @@ const HISTORY_KEY: Symbol = symbol_short!("HIST");
 const STORAGE_VERSION_KEY: Symbol = symbol_short!("VER");
 const STORAGE_VERSION: u32 = 1;
 const RESULT_SCHEMA_VERSION: u32 = 1;
+const MAX_HISTORY_SIZE: u32 = 1000; // SC-062: bounded retention cap
 
 // -----------------------------------------------------------------------
 // Events
@@ -703,7 +704,17 @@ impl SLACalculatorContract {
             .unwrap_or_else(|| Vec::new(&env));
 
         history.push_back(result.clone());
-        env.storage().instance().set(&HISTORY_KEY, &history);
+
+        // SC-062: enforce bounded retention – drop oldest entry when cap is exceeded
+        if history.len() > MAX_HISTORY_SIZE {
+            let mut trimmed = Vec::new(&env);
+            for i in 1..history.len() {
+                trimmed.push_back(history.get(i).unwrap());
+            }
+            env.storage().instance().set(&HISTORY_KEY, &trimmed);
+        } else {
+            env.storage().instance().set(&HISTORY_KEY, &history);
+        }
 
         // Mutate stats and emit events depending on outcome
         if result.status == symbol_short!("viol") {
@@ -857,41 +868,37 @@ impl SLACalculatorContract {
         }
 
         // Severity-specific validation to ensure logical consistency
-        match severity.to_string().as_str() {
-            "critical" => {
-                // Critical should have shortest thresholds and highest penalties
-                if threshold_minutes > 60 {
-                    return Err(SLAError::InvalidThreshold);
-                }
-                if penalty_per_minute < 50 {
-                    return Err(SLAError::InvalidPenalty);
-                }
+        if *severity == symbol_short!("critical") {
+            // Critical should have shortest thresholds and highest penalties
+            if threshold_minutes > 60 {
+                return Err(SLAError::InvalidThreshold);
             }
-            "high" => {
-                // High severity thresholds should be reasonable
-                if threshold_minutes > 120 {
-                    return Err(SLAError::InvalidThreshold);
-                }
-                if penalty_per_minute < 25 {
-                    return Err(SLAError::InvalidPenalty);
-                }
+            if penalty_per_minute < 50 {
+                return Err(SLAError::InvalidPenalty);
             }
-            "medium" => {
-                // Medium severity thresholds
-                if threshold_minutes > 240 {
-                    return Err(SLAError::InvalidThreshold);
-                }
-                if penalty_per_minute < 10 {
-                    return Err(SLAError::InvalidPenalty);
-                }
+        } else if *severity == symbol_short!("high") {
+            // High severity thresholds should be reasonable
+            if threshold_minutes > 120 {
+                return Err(SLAError::InvalidThreshold);
             }
-            "low" => {
-                // Low severity can have longer thresholds but lower penalties
-                if penalty_per_minute > 100 {
-                    return Err(SLAError::InvalidPenalty);
-                }
+            if penalty_per_minute < 25 {
+                return Err(SLAError::InvalidPenalty);
             }
-            _ => return Err(SLAError::InvalidSeverity),
+        } else if *severity == symbol_short!("medium") {
+            // Medium severity thresholds
+            if threshold_minutes > 240 {
+                return Err(SLAError::InvalidThreshold);
+            }
+            if penalty_per_minute < 10 {
+                return Err(SLAError::InvalidPenalty);
+            }
+        } else if *severity == symbol_short!("low") {
+            // Low severity can have longer thresholds but lower penalties
+            if penalty_per_minute > 100 {
+                return Err(SLAError::InvalidPenalty);
+            }
+        } else {
+            return Err(SLAError::InvalidSeverity);
         }
 
         Ok(())
@@ -996,6 +1003,84 @@ impl SLACalculatorContract {
         }
 
         Ok(())
+    }
+
+    // -------------------------------------------------------------------
+    // SC-059: History pagination
+    // -------------------------------------------------------------------
+
+    /// Returns a bounded page of history entries.
+    /// `offset` is zero-based; entries are ordered oldest-first (insertion order).
+    /// Returns an empty Vec when `offset` is beyond the end of history.
+    pub fn get_history_page(env: Env, offset: u32, limit: u32) -> Result<Vec<SLAResult>, SLAError> {
+        Self::check_version(&env)?;
+        let history: Vec<SLAResult> = env
+            .storage()
+            .instance()
+            .get(&HISTORY_KEY)
+            .unwrap_or_else(|| Vec::new(&env));
+        let len = history.len();
+        let mut page = Vec::new(&env);
+        if offset >= len || limit == 0 {
+            return Ok(page);
+        }
+        let end = (offset + limit).min(len);
+        for i in offset..end {
+            page.push_back(history.get(i).unwrap());
+        }
+        Ok(page)
+    }
+
+    // -------------------------------------------------------------------
+    // SC-060: History query by outage identifier
+    // -------------------------------------------------------------------
+
+    /// Returns all history entries whose `outage_id` matches the given value.
+    /// Returns an empty Vec when no matching entries exist.
+    pub fn get_history_by_outage(
+        env: Env,
+        outage_id: Symbol,
+    ) -> Result<Vec<SLAResult>, SLAError> {
+        Self::check_version(&env)?;
+        let history: Vec<SLAResult> = env
+            .storage()
+            .instance()
+            .get(&HISTORY_KEY)
+            .unwrap_or_else(|| Vec::new(&env));
+        let mut matches = Vec::new(&env);
+        for i in 0..history.len() {
+            let entry = history.get(i).unwrap();
+            if entry.outage_id == outage_id {
+                matches.push_back(entry);
+            }
+        }
+        Ok(matches)
+    }
+
+    // -------------------------------------------------------------------
+    // SC-061: Latest result by outage identifier
+    // -------------------------------------------------------------------
+
+    /// Returns the most recent history entry for the given `outage_id`, or `None`
+    /// if no entry exists for that outage.
+    pub fn get_latest_by_outage(
+        env: Env,
+        outage_id: Symbol,
+    ) -> Result<Option<SLAResult>, SLAError> {
+        Self::check_version(&env)?;
+        let history: Vec<SLAResult> = env
+            .storage()
+            .instance()
+            .get(&HISTORY_KEY)
+            .unwrap_or_else(|| Vec::new(&env));
+        let mut latest: Option<SLAResult> = None;
+        for i in 0..history.len() {
+            let entry = history.get(i).unwrap();
+            if entry.outage_id == outage_id {
+                latest = Some(entry);
+            }
+        }
+        Ok(latest)
     }
 
     // -------------------------------------------------------------------

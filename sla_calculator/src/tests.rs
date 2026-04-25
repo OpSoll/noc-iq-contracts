@@ -1039,24 +1039,25 @@ fn test_config_version_hash_stable_after_same_value_write() {
 #[test]
 fn test_config_version_hash_collision_resistance() {
     let (_env, client, actors) = setup();
-    
+
     // Get initial hash
     let initial_hash = client.get_config_version_hash();
-    
-    // Create a different config that would have same additive checksum
+
+    // Create a different config with different field values but same total sum
     // Original critical: threshold=15, penalty=100, reward=750 (sum=865)
-    // New critical: threshold=865, penalty=0, reward=0 (sum=865)
-    client.set_config(&actors.admin, &symbol_short!("critical"), &865, &0, &0);
+    // New critical: threshold=20, penalty=95, reward=750 (sum=865, same additive sum)
+    // Both are valid critical configs (threshold<=60, penalty>=50)
+    client.set_config(&actors.admin, &symbol_short!("critical"), &20, &95, &750);
     let collision_attempt_hash = client.get_config_version_hash();
-    
+
     // Hash should be different despite same additive sum
-    assert_ne!(initial_hash, collision_attempt_hash, 
+    assert_ne!(initial_hash, collision_attempt_hash,
         "Hash should resist collision from additive checksum equivalence");
-    
+
     // Restore original config
     client.set_config(&actors.admin, &symbol_short!("critical"), &15, &100, &750);
     let restored_hash = client.get_config_version_hash();
-    assert_eq!(initial_hash, restored_hash, 
+    assert_eq!(initial_hash, restored_hash,
         "Hash should return to original value after restoring config");
 }
 
@@ -1184,8 +1185,9 @@ fn test_repeated_config_updates_do_not_corrupt_calculation() {
 fn test_repeated_config_updates_across_severities_are_independent() {
     let (_env, client, actors) = setup();
 
-    client.set_config(&actors.admin, &symbol_short!("critical"), &5, &10, &100);
-    client.set_config(&actors.admin, &symbol_short!("high"), &5, &10, &100);
+    // Use valid values: critical requires penalty>=50, threshold<=60; high requires penalty>=25, threshold<=120
+    client.set_config(&actors.admin, &symbol_short!("critical"), &10, &50, &500);
+    client.set_config(&actors.admin, &symbol_short!("high"), &20, &25, &400);
 
     // medium and low must remain at their defaults
     let medium = client.get_config(&symbol_short!("medium"));
@@ -1322,8 +1324,7 @@ fn setup_after_calculation(severity: &str, mttr: u32) -> (Env, SLACalculatorCont
             &symbol(&env, "FIXTURE_ID"),
             &symbol(&env, severity),
             &mttr,
-        )
-        .unwrap();
+        );
     (env, client, actors)
 }
 
@@ -1339,14 +1340,14 @@ fn test_fixture_custom_critical_config_is_applied() {
 #[test]
 fn test_fixture_after_calculation_history_has_one_entry() {
     let (_env, client, _actors) = setup_after_calculation("critical", 5);
-    let history = client.get_history().unwrap();
+    let history = client.get_history();
     assert_eq!(history.len(), 1);
 }
 
 #[test]
 fn test_fixture_after_calculation_stats_are_updated() {
     let (_env, client, _actors) = setup_after_calculation("high", 35);
-    let stats = client.get_stats().unwrap();
+    let stats = client.get_stats();
     assert_eq!(stats.total_calculations, 1);
     assert_eq!(stats.total_violations, 1);
 }
@@ -1366,8 +1367,10 @@ fn test_calculate_sla_unknown_severity_panics() {
             &symbol_short!("OUT001"),
             &symbol_short!("xyz"),
             &10,
-        )
-        .unwrap();
+        );
+}
+
+// ============================================================
 // #63 – Two-step admin transfer
 // ============================================================
 
@@ -1384,7 +1387,6 @@ fn test_propose_and_accept_admin() {
     assert_eq!(client.get_pending_admin(), None);
 }
 
-#[test]
 #[test]
 #[should_panic]
 fn test_old_admin_loses_authority_after_accept() {
@@ -1440,7 +1442,6 @@ fn test_propose_and_accept_operator() {
 }
 
 #[test]
-#[test]
 #[should_panic]
 fn test_old_operator_locked_out_after_handoff() {
     let (env, client, actors) = setup();
@@ -1467,6 +1468,9 @@ fn test_wrong_address_cannot_accept_operator() {
 
     client.propose_operator(&actors.admin, &new_op);
     client.accept_operator(&stranger); // must panic
+}
+
+// ============================================================
 // #60 – Contract metadata / capabilities view
 // ============================================================
 
@@ -1521,6 +1525,10 @@ fn test_get_config_unknown_severity_panics() {
     let (_env, client, _actors) = setup();
     // "CRIT" (uppercase) is not a valid severity key
     client.get_config(&symbol_short!("CRIT"));
+}
+
+#[test]
+#[should_panic]
 fn test_accept_operator_without_proposal_fails() {
     let (_env, client, actors) = setup();
     client.accept_operator(&actors.stranger);
@@ -1554,8 +1562,7 @@ fn test_calculate_sla_wrong_case_severity_panics() {
             &symbol_short!("OUT002"),
             &symbol_short!("HIGH"),
             &10,
-        )
-        .unwrap();
+        );
 }
 #[test]
 #[should_panic]
@@ -1567,6 +1574,7 @@ fn test_calculate_sla_view_unknown_severity_panics() {
         &10,
     );
 }
+// ============================================================
 // #96 – Backend-consumer smoke fixture (end-to-end sequence)
 // ============================================================
 
@@ -1582,23 +1590,21 @@ fn test_backend_smoke_initialize_config_calculate_history_stats() {
     assert!(critical_cfg.reward_base > 0);
 
     // Step 3: calculate — operator submits an SLA result
-    let result = client
-        .calculate_sla(
-            &actors.operator,
-            &symbol(&env, "SMOKE_001"),
-            &symbol_short!("critical"),
-            &10,
-        )
-        .unwrap();
+    let result = client.calculate_sla(
+        &actors.operator,
+        &symbol(&env, "SMOKE_001"),
+        &symbol_short!("critical"),
+        &10,
+    );
     assert_eq!(result.status, symbol_short!("met"));
 
     // Step 4: history read — the calculation appears in history
-    let history = client.get_history().unwrap();
+    let history = client.get_history();
     assert_eq!(history.len(), 1);
     assert_eq!(history.get(0).unwrap().outage_id, symbol(&env, "SMOKE_001"));
 
     // Step 5: stats read — counters reflect the single met calculation
-    let stats = client.get_stats().unwrap();
+    let stats = client.get_stats();
     assert_eq!(stats.total_calculations, 1);
     assert_eq!(stats.total_violations, 0);
     assert!(stats.total_rewards > 0);
@@ -1610,27 +1616,33 @@ fn test_backend_smoke_violation_path() {
     let (env, client, actors) = setup();
 
     // critical threshold is 15 min; 30 min exceeds it → violation
-    let result = client
-        .calculate_sla(
-            &actors.operator,
-            &symbol(&env, "SMOKE_002"),
-            &symbol_short!("critical"),
-            &30,
-        )
-        .unwrap();
+    let result = client.calculate_sla(
+        &actors.operator,
+        &symbol(&env, "SMOKE_002"),
+        &symbol_short!("critical"),
+        &30,
+    );
     assert_eq!(result.status, symbol_short!("viol"));
     assert_eq!(result.payment_type, symbol_short!("pen"));
     assert!(result.amount < 0);
 
-    let stats = client.get_stats().unwrap();
+    let stats = client.get_stats();
     assert_eq!(stats.total_violations, 1);
     assert_eq!(stats.total_rewards, 0);
     assert!(stats.total_penalties > 0);
+}
+
+#[test]
+#[should_panic]
 fn test_admin_gated_call_fails_after_renounce() {
     let (env, client, actors) = setup();
     client.renounce_admin(&actors.admin);
     // set_config must now panic – no admin exists
     client.set_config(&actors.admin, &symbol_short!("critical"), &20, &200, &1000);
+}
+
+#[test]
+#[should_panic]
 fn test_migrate_rejected_for_non_admin() {
     let (_env, client, actors) = setup();
     client.migrate(&actors.stranger);
@@ -1723,6 +1735,10 @@ fn test_unpause_clears_pause_info() {
 fn test_get_pause_info_none_when_not_paused() {
     let (_env, client, _actors) = setup();
     assert_eq!(client.get_pause_info(), None);
+}
+
+#[test]
+#[should_panic]
 fn test_calculate_sla_view_rejects_unknown_severity() {
     let (env, client, _actors) = setup();
     client.calculate_sla_view(
@@ -1935,9 +1951,7 @@ fn test_validation_prevents_partial_state_changes() {
     assert_eq!(original.reward_base, 750);
 
     // Attempt invalid config change - should fail without modifying state
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        client.set_config(&actors.admin, &symbol_short!("critical"), &0, &100, &750);
-    }));
+    let result = client.try_set_config(&actors.admin, &symbol_short!("critical"), &0, &100, &750);
     assert!(result.is_err());
 
     // Verify original config is unchanged
@@ -1955,9 +1969,7 @@ fn test_validation_works_after_successful_config_change() {
     client.set_config(&actors.admin, &symbol_short!("critical"), &30, &150, &1000);
 
     // Now attempt an invalid change - should still fail
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        client.set_config(&actors.admin, &symbol_short!("critical"), &0, &150, &1000);
-    }));
+    let result = client.try_set_config(&actors.admin, &symbol_short!("critical"), &0, &150, &1000);
     assert!(result.is_err());
 
     // Verify the valid change is still in place
@@ -1975,15 +1987,308 @@ fn test_validation_applies_to_all_severities_independently() {
     client.set_config(&actors.admin, &symbol_short!("critical"), &25, &120, &900);
 
     // Invalid change to high should not affect critical
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        client.set_config(&actors.admin, &symbol_short!("high"), &0, &50, &750);
-    }));
+    let result = client.try_set_config(&actors.admin, &symbol_short!("high"), &0, &50, &750);
     assert!(result.is_err());
 
     // Verify critical is unchanged and high is still at default
     let critical = client.get_config(&symbol_short!("critical"));
     assert_eq!(critical.threshold_minutes, 25);
-    
+
     let high = client.get_config(&symbol_short!("high"));
     assert_eq!(high.threshold_minutes, 30); // still default
+}
+
+// ============================================================
+// SC-059 – History pagination
+// ============================================================
+
+#[test]
+fn test_get_history_page_returns_correct_slice() {
+    let (_env, client, actors) = setup();
+
+    for i in 0..5u32 {
+        let _ = i; // suppress unused warning
+        client.calculate_sla(
+            &actors.operator,
+            &symbol_short!("PG_ID"),
+            &symbol_short!("low"),
+            &10,
+        );
+    }
+
+    // Page 0: first 2
+    let page0 = client.get_history_page(&0, &2);
+    assert_eq!(page0.len(), 2);
+
+    // Page 1: next 2
+    let page1 = client.get_history_page(&2, &2);
+    assert_eq!(page1.len(), 2);
+
+    // Page 2: last 1
+    let page2 = client.get_history_page(&4, &2);
+    assert_eq!(page2.len(), 1);
+}
+
+#[test]
+fn test_get_history_page_empty_when_offset_beyond_end() {
+    let (_env, client, actors) = setup();
+
+    client.calculate_sla(
+        &actors.operator,
+        &symbol_short!("PG_OOB"),
+        &symbol_short!("low"),
+        &10,
+    );
+
+    let page = client.get_history_page(&100, &10);
+    assert_eq!(page.len(), 0);
+}
+
+#[test]
+fn test_get_history_page_empty_history() {
+    let (_env, client, _actors) = setup();
+    let page = client.get_history_page(&0, &10);
+    assert_eq!(page.len(), 0);
+}
+
+#[test]
+fn test_get_history_page_zero_limit_returns_empty() {
+    let (_env, client, actors) = setup();
+
+    client.calculate_sla(
+        &actors.operator,
+        &symbol_short!("PG_ZL"),
+        &symbol_short!("low"),
+        &10,
+    );
+
+    let page = client.get_history_page(&0, &0);
+    assert_eq!(page.len(), 0);
+}
+
+#[test]
+fn test_get_history_page_order_is_oldest_first() {
+    let (env, client, actors) = setup();
+
+    client.calculate_sla(
+        &actors.operator,
+        &symbol(&env, "FIRST"),
+        &symbol_short!("low"),
+        &10,
+    );
+    client.calculate_sla(
+        &actors.operator,
+        &symbol(&env, "SECOND"),
+        &symbol_short!("low"),
+        &10,
+    );
+
+    let page = client.get_history_page(&0, &2);
+    assert_eq!(page.get(0).unwrap().outage_id, symbol(&env, "FIRST"));
+    assert_eq!(page.get(1).unwrap().outage_id, symbol(&env, "SECOND"));
+}
+
+// ============================================================
+// SC-060 – History query by outage identifier
+// ============================================================
+
+#[test]
+fn test_get_history_by_outage_returns_matching_entries() {
+    let (env, client, actors) = setup();
+
+    client.calculate_sla(
+        &actors.operator,
+        &symbol(&env, "OUT_A"),
+        &symbol_short!("low"),
+        &10,
+    );
+    client.calculate_sla(
+        &actors.operator,
+        &symbol(&env, "OUT_B"),
+        &symbol_short!("low"),
+        &10,
+    );
+    client.calculate_sla(
+        &actors.operator,
+        &symbol(&env, "OUT_A"),
+        &symbol_short!("critical"),
+        &5,
+    );
+
+    let results = client.get_history_by_outage(&symbol(&env, "OUT_A"));
+    assert_eq!(results.len(), 2);
+    assert_eq!(results.get(0).unwrap().outage_id, symbol(&env, "OUT_A"));
+    assert_eq!(results.get(1).unwrap().outage_id, symbol(&env, "OUT_A"));
+}
+
+#[test]
+fn test_get_history_by_outage_returns_empty_for_unknown_id() {
+    let (env, client, actors) = setup();
+
+    client.calculate_sla(
+        &actors.operator,
+        &symbol(&env, "OUT_X"),
+        &symbol_short!("low"),
+        &10,
+    );
+
+    let results = client.get_history_by_outage(&symbol(&env, "MISSING"));
+    assert_eq!(results.len(), 0);
+}
+
+#[test]
+fn test_get_history_by_outage_empty_history() {
+    let (env, client, _actors) = setup();
+    let results = client.get_history_by_outage(&symbol(&env, "NONE"));
+    assert_eq!(results.len(), 0);
+}
+
+// ============================================================
+// SC-061 – Latest result by outage identifier
+// ============================================================
+
+#[test]
+fn test_get_latest_by_outage_returns_most_recent() {
+    let (env, client, actors) = setup();
+
+    // Two calculations for the same outage; second should be returned
+    client.calculate_sla(
+        &actors.operator,
+        &symbol(&env, "LAT_A"),
+        &symbol_short!("critical"),
+        &20, // violation
+    );
+    client.calculate_sla(
+        &actors.operator,
+        &symbol(&env, "LAT_A"),
+        &symbol_short!("critical"),
+        &5, // met
+    );
+
+    let latest = client.get_latest_by_outage(&symbol(&env, "LAT_A"));
+    assert!(latest.is_some());
+    let r = latest.unwrap();
+    assert_eq!(r.outage_id, symbol(&env, "LAT_A"));
+    assert_eq!(r.status, symbol_short!("met")); // second call was met
+}
+
+#[test]
+fn test_get_latest_by_outage_returns_none_for_missing() {
+    let (env, client, _actors) = setup();
+    let result = client.get_latest_by_outage(&symbol(&env, "GHOST"));
+    assert!(result.is_none());
+}
+
+#[test]
+fn test_get_latest_by_outage_single_entry() {
+    let (env, client, actors) = setup();
+
+    client.calculate_sla(
+        &actors.operator,
+        &symbol(&env, "SOLO"),
+        &symbol_short!("high"),
+        &10,
+    );
+
+    let latest = client.get_latest_by_outage(&symbol(&env, "SOLO"));
+    assert!(latest.is_some());
+    assert_eq!(latest.unwrap().outage_id, symbol(&env, "SOLO"));
+}
+
+#[test]
+fn test_get_latest_by_outage_does_not_return_other_outage() {
+    let (env, client, actors) = setup();
+
+    client.calculate_sla(
+        &actors.operator,
+        &symbol(&env, "OUT_1"),
+        &symbol_short!("low"),
+        &10,
+    );
+
+    let result = client.get_latest_by_outage(&symbol(&env, "OUT_2"));
+    assert!(result.is_none());
+}
+
+// ============================================================
+// SC-062 – Bounded-history retention
+// ============================================================
+
+#[test]
+fn test_history_does_not_exceed_max_size() {
+    let env = Env::default();
+    env.budget().reset_unlimited();
+
+    let cid = env.register_contract(None, SLACalculatorContract);
+    let client = SLACalculatorContractClient::new(&env, &cid);
+    let admin = soroban_sdk::Address::generate(&env);
+    let op = soroban_sdk::Address::generate(&env);
+    client.initialize(&admin, &op);
+
+    // Insert MAX_HISTORY_SIZE + 5 entries
+    for _ in 0..1005u32 {
+        client.calculate_sla(&op, &symbol_short!("CAP"), &symbol_short!("low"), &10);
+    }
+
+    let history = client.get_history();
+    assert_eq!(
+        history.len(),
+        1000,
+        "History must be capped at MAX_HISTORY_SIZE"
+    );
+}
+
+#[test]
+fn test_history_cap_drops_oldest_entry() {
+    let env = Env::default();
+    env.budget().reset_unlimited();
+
+    let cid = env.register_contract(None, SLACalculatorContract);
+    let client = SLACalculatorContractClient::new(&env, &cid);
+    let admin = soroban_sdk::Address::generate(&env);
+    let op = soroban_sdk::Address::generate(&env);
+    client.initialize(&admin, &op);
+
+    // Fill to exactly MAX_HISTORY_SIZE with a sentinel first entry
+    client.calculate_sla(&op, &symbol(&env, "SENTINEL"), &symbol_short!("low"), &10);
+    for _ in 1..1000u32 {
+        client.calculate_sla(&op, &symbol_short!("FILLER"), &symbol_short!("low"), &10);
+    }
+
+    // Sentinel is still present at index 0
+    let history_before = client.get_history();
+    assert_eq!(history_before.get(0).unwrap().outage_id, symbol(&env, "SENTINEL"));
+
+    // One more push should evict the sentinel
+    client.calculate_sla(&op, &symbol_short!("NEW"), &symbol_short!("low"), &10);
+
+    let history_after = client.get_history();
+    assert_eq!(history_after.len(), 1000);
+    // Sentinel is gone; first entry is now a FILLER
+    assert_ne!(
+        history_after.get(0).unwrap().outage_id,
+        symbol(&env, "SENTINEL")
+    );
+    // Newest entry is at the end
+    assert_eq!(
+        history_after.get(999).unwrap().outage_id,
+        symbol_short!("NEW")
+    );
+}
+
+#[test]
+fn test_history_below_cap_is_not_trimmed() {
+    let (_env, client, actors) = setup();
+
+    for _ in 0..5u32 {
+        client.calculate_sla(
+            &actors.operator,
+            &symbol_short!("SAFE"),
+            &symbol_short!("low"),
+            &10,
+        );
+    }
+
+    let history = client.get_history();
+    assert_eq!(history.len(), 5, "History below cap must not be trimmed");
 }
