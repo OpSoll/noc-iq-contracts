@@ -38,6 +38,16 @@ jobs:
       - name: Build wasm32 target
         run: cargo build --release --manifest-path sla_calculator/Cargo.toml --target wasm32-unknown-unknown
 
+      # SC-044 — explicit no-std check: compile the library crate (not tests) for
+      # wasm32-unknown-unknown, which has no std.  This catches accidental std
+      # imports (e.g. std::vec, std::string, println!) that cargo test on the host
+      # would silently accept because the test harness re-enables std.
+      # The wasm32 target has no OS and no std by default, so any std usage that
+      # slips past #![no_std] will surface here as a compile error before it ever
+      # reaches a deployed contract.
+      - name: no-std compliance check (wasm32)
+        run: cargo check --manifest-path sla_calculator/Cargo.toml --target wasm32-unknown-unknown --lib
+
       # SC-078 — surface contract size after release build
       - name: Check contract binary size
         run: |

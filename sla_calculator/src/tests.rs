@@ -2863,3 +2863,295 @@ fn test_monotonicity_view_matches_mutating_for_all_mttr_values() {
         assert_eq!(view.payment_type, mutating.payment_type, "payment_type mismatch at mttr={}", mttr);
     }
 }
+
+// ============================================================
+// SC-022 – Fuller storage migration harness (#142)
+// ============================================================
+
+#[test]
+fn test_migrate_v0_to_v1_stamps_version() {
+    // Simulate a legacy contract that has no version key (v0 state).
+    let env = Env::default();
+    let cid = env.register_contract(None, SLACalculatorContract);
+    let client = SLACalculatorContractClient::new(&env, &cid);
+    let admin = soroban_sdk::Address::generate(&env);
+    let op = soroban_sdk::Address::generate(&env);
+    client.initialize(&admin, &op);
+
+    // Manually remove the version key to simulate v0 state
+    env.as_contract(&cid, || {
+        env.storage().instance().remove(&STORAGE_VERSION_KEY);
+    });
+
+    // Verify the contract is now in an unversioned state (get_admin would fail check_version)
+    // migrate() must succeed and restore the version
+    client.migrate(&admin);
+
+    // Contract is functional again
+    assert_eq!(client.get_storage_version(), 1);
+    assert_eq!(client.get_admin(), admin);
+}
+
+#[test]
+fn test_migrate_idempotent_when_already_current() {
+    let (_env, client, actors) = setup();
+    // Already at v1 – calling migrate multiple times must be a no-op
+    client.migrate(&actors.admin);
+    client.migrate(&actors.admin);
+    client.migrate(&actors.admin);
+    assert_eq!(client.get_storage_version(), 1);
+}
+
+#[test]
+#[should_panic]
+fn test_migrate_rejected_for_non_admin_sc022() {
+    let (_env, client, actors) = setup();
+    client.migrate(&actors.operator);
+}
+
+#[test]
+fn test_migrate_does_not_corrupt_existing_state() {
+    // After a v0→v1 migration the config, stats, and history must be intact.
+    let env = Env::default();
+    let cid = env.register_contract(None, SLACalculatorContract);
+    let client = SLACalculatorContractClient::new(&env, &cid);
+    let admin = soroban_sdk::Address::generate(&env);
+    let op = soroban_sdk::Address::generate(&env);
+    client.initialize(&admin, &op);
+
+    // Do a calculation to populate history and stats
+    client.calculate_sla(&op, &symbol_short!("MIG001"), &symbol_short!("critical"), &5);
+
+    // Simulate v0 state
+    env.as_contract(&cid, || {
+        env.storage().instance().remove(&STORAGE_VERSION_KEY);
+    });
+
+    client.migrate(&admin);
+
+    // State must be intact
+    let stats = client.get_stats();
+    assert_eq!(stats.total_calculations, 1);
+    let history = client.get_history();
+    assert_eq!(history.len(), 1);
+    let cfg = client.get_config(&symbol_short!("critical"));
+    assert_eq!(cfg.threshold_minutes, 15);
+}
+
+#[test]
+#[should_panic]
+fn test_migrate_rejects_future_version() {
+    // A stored version newer than STORAGE_VERSION must be rejected.
+    let env = Env::default();
+    let cid = env.register_contract(None, SLACalculatorContract);
+    let client = SLACalculatorContractClient::new(&env, &cid);
+    let admin = soroban_sdk::Address::generate(&env);
+    let op = soroban_sdk::Address::generate(&env);
+    client.initialize(&admin, &op);
+
+    env.as_contract(&cid, || {
+        env.storage().instance().set(&STORAGE_VERSION_KEY, &99u32);
+    });
+
+    client.migrate(&admin); // must panic – VersionMismatch
+}
+
+// ============================================================
+// SC-024 – Cancel pending admin/operator proposals (#144)
+// ============================================================
+
+#[test]
+fn test_cancel_admin_proposal_clears_pending() {
+    let (env, client, actors) = setup();
+    let new_admin = soroban_sdk::Address::generate(&env);
+
+    client.propose_admin(&actors.admin, &new_admin);
+    assert_eq!(client.get_pending_admin(), Some(new_admin.clone()));
+
+    client.cancel_admin_proposal(&actors.admin);
+    assert_eq!(client.get_pending_admin(), None);
+
+    // Original admin retains authority
+    assert_eq!(client.get_admin(), actors.admin);
+}
+
+#[test]
+fn test_cancel_admin_proposal_emits_event() {
+    let (env, client, actors) = setup();
+    let new_admin = soroban_sdk::Address::generate(&env);
+
+    client.propose_admin(&actors.admin, &new_admin);
+    client.cancel_admin_proposal(&actors.admin);
+
+    let events = env.events().all();
+    let (_, topics, _) = events.last().unwrap();
+    let topic_0: Symbol = topics.get(0).unwrap().try_into_val(&env).unwrap();
+    assert_eq!(topic_0, EVENT_ADMIN_CAN);
+}
+
+#[test]
+#[should_panic]
+fn test_cancel_admin_proposal_no_pending_fails() {
+    let (_env, client, actors) = setup();
+    // No proposal exists – must return NoPendingTransfer (panic in client)
+    client.cancel_admin_proposal(&actors.admin);
+}
+
+#[test]
+#[should_panic]
+fn test_cancel_admin_proposal_non_admin_fails() {
+    let (env, client, actors) = setup();
+    let new_admin = soroban_sdk::Address::generate(&env);
+
+    client.propose_admin(&actors.admin, &new_admin);
+    // Stranger cannot cancel
+    client.cancel_admin_proposal(&actors.stranger);
+}
+
+#[test]
+fn test_cancel_admin_proposal_then_repropose_works() {
+    // After cancellation the admin can issue a fresh proposal.
+    let (env, client, actors) = setup();
+    let first = soroban_sdk::Address::generate(&env);
+    let second = soroban_sdk::Address::generate(&env);
+
+    client.propose_admin(&actors.admin, &first);
+    client.cancel_admin_proposal(&actors.admin);
+
+    client.propose_admin(&actors.admin, &second);
+    assert_eq!(client.get_pending_admin(), Some(second.clone()));
+
+    client.accept_admin(&second);
+    assert_eq!(client.get_admin(), second);
+}
+
+#[test]
+fn test_cancel_operator_proposal_clears_pending() {
+    let (env, client, actors) = setup();
+    let new_op = soroban_sdk::Address::generate(&env);
+
+    client.propose_operator(&actors.admin, &new_op);
+    assert_eq!(client.get_pending_operator(), Some(new_op.clone()));
+
+    client.cancel_operator_proposal(&actors.admin);
+    assert_eq!(client.get_pending_operator(), None);
+
+    // Original operator retains authority
+    assert_eq!(client.get_operator(), actors.operator);
+}
+
+#[test]
+fn test_cancel_operator_proposal_emits_event() {
+    let (env, client, actors) = setup();
+    let new_op = soroban_sdk::Address::generate(&env);
+
+    client.propose_operator(&actors.admin, &new_op);
+    client.cancel_operator_proposal(&actors.admin);
+
+    let events = env.events().all();
+    let (_, topics, _) = events.last().unwrap();
+    let topic_0: Symbol = topics.get(0).unwrap().try_into_val(&env).unwrap();
+    assert_eq!(topic_0, EVENT_OP_CAN);
+}
+
+#[test]
+#[should_panic]
+fn test_cancel_operator_proposal_no_pending_fails() {
+    let (_env, client, actors) = setup();
+    client.cancel_operator_proposal(&actors.admin);
+}
+
+#[test]
+#[should_panic]
+fn test_cancel_operator_proposal_non_admin_fails() {
+    let (env, client, actors) = setup();
+    let new_op = soroban_sdk::Address::generate(&env);
+
+    client.propose_operator(&actors.admin, &new_op);
+    client.cancel_operator_proposal(&actors.operator);
+}
+
+#[test]
+fn test_cancel_operator_proposal_then_repropose_works() {
+    let (env, client, actors) = setup();
+    let first = soroban_sdk::Address::generate(&env);
+    let second = soroban_sdk::Address::generate(&env);
+
+    client.propose_operator(&actors.admin, &first);
+    client.cancel_operator_proposal(&actors.admin);
+
+    client.propose_operator(&actors.admin, &second);
+    assert_eq!(client.get_pending_operator(), Some(second.clone()));
+
+    client.accept_operator(&second);
+    assert_eq!(client.get_operator(), second);
+}
+
+// ============================================================
+// SC-037 – Backend-consumer smoke fixture (#157)
+// ============================================================
+
+/// Full end-to-end sequence mirroring how the backend invokes the contract:
+/// initialize → metadata → config snapshot → calculate (met) → calculate (viol)
+/// → history → stats.  Uses realistic severity/outage inputs.
+#[test]
+fn test_sc037_backend_consumer_smoke_full_sequence() {
+    let (env, client, actors) = setup();
+
+    // 1. Metadata introspection (backend reads capabilities on startup)
+    let meta = client.get_contract_metadata();
+    assert_eq!(meta.storage_version, 1);
+    assert_eq!(meta.supported_severities.len(), 4);
+
+    // 2. Config snapshot (backend caches config for parity checks)
+    let snapshot = client.get_config_snapshot();
+    assert_eq!(snapshot.entries.len(), 4);
+    let critical_entry = snapshot.entries.get(0).unwrap();
+    assert_eq!(critical_entry.severity, symbol_short!("critical"));
+    assert_eq!(critical_entry.config.threshold_minutes, 15);
+
+    // 3. Calculate – critical incident resolved in 8 min (well within threshold → "top")
+    let r1 = client.calculate_sla(
+        &actors.operator,
+        &symbol(&env, "INC-2026-001"),
+        &symbol_short!("critical"),
+        &8,
+    );
+    assert_eq!(r1.status, symbol_short!("met"));
+    assert_eq!(r1.rating, symbol_short!("top"));
+    assert!(r1.amount > 0);
+
+    // 4. Calculate – high incident resolved in 45 min (exceeds 30-min threshold → violation)
+    let r2 = client.calculate_sla(
+        &actors.operator,
+        &symbol(&env, "INC-2026-002"),
+        &symbol_short!("high"),
+        &45,
+    );
+    assert_eq!(r2.status, symbol_short!("viol"));
+    assert_eq!(r2.payment_type, symbol_short!("pen"));
+    assert!(r2.amount < 0);
+
+    // 5. History access – both calculations appear in order
+    let history = client.get_history();
+    assert_eq!(history.len(), 2);
+    assert_eq!(history.get(0).unwrap().outage_id, symbol(&env, "INC-2026-001"));
+    assert_eq!(history.get(1).unwrap().outage_id, symbol(&env, "INC-2026-002"));
+
+    // 6. Stats access – counters are coherent
+    let stats = client.get_stats();
+    assert_eq!(stats.total_calculations, 2);
+    assert_eq!(stats.total_violations, 1);
+    assert!(stats.total_rewards > 0);
+    assert!(stats.total_penalties > 0);
+
+    // 7. View-only calculation (backend audit path) – must match mutating result
+    let view = client.calculate_sla_view(
+        &symbol(&env, "INC-2026-001"),
+        &symbol_short!("critical"),
+        &8,
+    );
+    assert_eq!(view.status, r1.status);
+    assert_eq!(view.amount, r1.amount);
+    assert_eq!(view.rating, r1.rating);
+}
