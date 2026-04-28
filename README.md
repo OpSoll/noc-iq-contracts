@@ -181,6 +181,26 @@ As of the latest stabilization pass:
 - the crate compiles cleanly
 - the checked-in test suite is wired into the crate and runs
 
+### no-std Compliance
+
+Soroban contracts run inside a WASM sandbox that has no operating system and no
+Rust standard library.  The crate is declared `#![no_std]` to enforce this at
+the source level, but `cargo test` on the host re-enables `std` via the test
+harness — so a stray `use std::vec::Vec` or `println!` would compile fine in
+tests yet fail at deployment.
+
+The CI pipeline therefore includes a dedicated **no-std compliance check**:
+
+```bash
+cargo check --target wasm32-unknown-unknown --lib
+```
+
+This compiles only the library crate (not the test harness) for the
+`wasm32-unknown-unknown` target, which has no `std`.  Any accidental `std`
+import surfaces as a compile error here before it can reach a deployed contract.
+The step runs after the host tests so regressions are caught in the same PR that
+introduces them.
+
 The current test suite covers:
 
 - role and authorization behavior
@@ -223,6 +243,8 @@ Admin authority is transferred via a two-step flow to prevent accidental reassig
 
 The old admin retains authority until `accept_admin` succeeds. `get_pending_admin()` is queryable at any time.
 
+To cancel a stale or mistaken proposal before it is accepted, the current admin calls `cancel_admin_proposal(caller)`. This clears the pending proposal without changing the active admin. The call returns an error if no proposal is pending. After cancellation the admin may issue a fresh `propose_admin` for a different address.
+
 ### Operator handoff (two-step)
 
 Operator rotation follows the same pattern:
@@ -231,6 +253,8 @@ Operator rotation follows the same pattern:
 2. New operator calls `accept_operator(caller)` to activate.
 
 `get_pending_operator()` exposes the pending state for governance visibility.
+
+To cancel a pending operator proposal, the admin calls `cancel_operator_proposal(caller)`. The active operator is unchanged. A fresh `propose_operator` may be issued immediately after cancellation.
 
 ### Admin renounce
 

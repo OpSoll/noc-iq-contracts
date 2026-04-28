@@ -69,9 +69,11 @@ const EVENT_PRUNED: Symbol = symbol_short!("pruned");
 const EVENT_PRUNED_AGE: Symbol = symbol_short!("pruned_a"); // SC-063
 const EVENT_ADMIN_PROP: Symbol = symbol_short!("adm_prop"); // #63
 const EVENT_ADMIN_ACC: Symbol = symbol_short!("adm_acc"); // #63
+const EVENT_ADMIN_CAN: Symbol = symbol_short!("adm_can"); // SC-024
 const EVENT_ADMIN_REN: Symbol = symbol_short!("adm_ren"); // #65
 const EVENT_OP_PROP: Symbol = symbol_short!("op_prop"); // #64
 const EVENT_OP_ACC: Symbol = symbol_short!("op_acc"); // #64
+const EVENT_OP_CAN: Symbol = symbol_short!("op_can"); // SC-024
 const EVENT_VERSION: Symbol = symbol_short!("v1");
 
 // -----------------------------------------------------------------------
@@ -273,8 +275,13 @@ impl SLACalculatorContract {
     // -------------------------------------------------------------------
 
     /// Migrate storage from a previous version to the current one.
+    ///
     /// Must be called by admin after a contract upgrade that bumps STORAGE_VERSION.
-    /// Currently handles v0→v1 (first-time version stamp on legacy state).
+    /// The harness applies each step in sequence (v0→v1, v1→v2, …) so a contract
+    /// that is multiple versions behind is brought fully up to date in one call.
+    /// Re-invoking when already current is a safe no-op (idempotent).
+    /// If an unknown stored version is encountered the call returns
+    /// `VersionMismatch` without mutating any state.
     pub fn migrate(env: Env, caller: Address) -> Result<(), SLAError> {
         // Require admin without going through check_version (state may be unversioned)
         let admin: Address = env
@@ -292,18 +299,43 @@ impl SLACalculatorContract {
             .get(&STORAGE_VERSION_KEY)
             .unwrap_or(0);
 
+        // Already current – idempotent no-op
         if stored == STORAGE_VERSION {
-            // Already current – idempotent no-op
             return Ok(());
         }
+
+        // Reject versions newer than what this binary knows about
+        if stored > STORAGE_VERSION {
+            return Err(SLAError::VersionMismatch);
+        }
+
+        // Apply each step in sequence.  Each arm must be a pure, atomic
+        // transformation: read old state → write new state → bump version.
+        // A future version bump adds a new arm here; existing arms are never
+        // modified so older migration paths remain auditable.
+        let mut current = stored;
 
         // v0 → v1: stamp the version; all other fields were set by initialize
-        if stored == 0 {
-            Self::write_version(&env);
-            return Ok(());
+        if current == 0 {
+            env.storage()
+                .instance()
+                .set(&STORAGE_VERSION_KEY, &1u32);
+            current = 1;
         }
 
-        Err(SLAError::VersionMismatch)
+        // v1 → v2 (placeholder for the next breaking state change):
+        // if current == 1 {
+        //     // … transform state …
+        //     env.storage().instance().set(&STORAGE_VERSION_KEY, &2u32);
+        //     current = 2;
+        // }
+
+        // Sanity: after all steps we must be at STORAGE_VERSION
+        if current != STORAGE_VERSION {
+            return Err(SLAError::VersionMismatch);
+        }
+
+        Ok(())
     }
 
     // -------------------------------------------------------------------
@@ -380,6 +412,21 @@ impl SLACalculatorContract {
         Ok(())
     }
 
+    /// Cancel a pending admin transfer. Only the current admin may cancel.
+    /// Clears the pending proposal without changing the active admin.
+    /// Returns `NoPendingTransfer` if there is nothing to cancel.
+    pub fn cancel_admin_proposal(env: Env, caller: Address) -> Result<(), SLAError> {
+        Self::check_version(&env)?;
+        Self::require_admin(&env, &caller)?;
+        if !env.storage().instance().has(&PENDING_ADMIN_KEY) {
+            return Err(SLAError::NoPendingTransfer);
+        }
+        env.storage().instance().remove(&PENDING_ADMIN_KEY);
+        env.events()
+            .publish((EVENT_ADMIN_CAN, EVENT_VERSION, caller), ());
+        Ok(())
+    }
+
     /// Returns the pending admin address, if any.
     pub fn get_pending_admin(env: Env) -> Result<Option<Address>, SLAError> {
         Self::check_version(&env)?;
@@ -421,6 +468,21 @@ impl SLACalculatorContract {
         env.storage().instance().remove(&PENDING_OP_KEY);
         env.events()
             .publish((EVENT_OP_ACC, EVENT_VERSION, caller), ());
+        Ok(())
+    }
+
+    /// Cancel a pending operator proposal. Only the current admin may cancel.
+    /// Clears the pending proposal without changing the active operator.
+    /// Returns `NoPendingTransfer` if there is nothing to cancel.
+    pub fn cancel_operator_proposal(env: Env, caller: Address) -> Result<(), SLAError> {
+        Self::check_version(&env)?;
+        Self::require_admin(&env, &caller)?;
+        if !env.storage().instance().has(&PENDING_OP_KEY) {
+            return Err(SLAError::NoPendingTransfer);
+        }
+        env.storage().instance().remove(&PENDING_OP_KEY);
+        env.events()
+            .publish((EVENT_OP_CAN, EVENT_VERSION, caller), ());
         Ok(())
     }
 
