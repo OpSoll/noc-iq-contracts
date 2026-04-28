@@ -1,0 +1,76 @@
+name: Release Artifact Hash Manifest
+
+# SC-003 (#123) – Produce and verify a deterministic hash manifest for the
+# release WASM artifact so operators can confirm what they are deploying.
+#
+# Manifest format (manifest.sha256):
+#   <sha256hex>  sla_calculator.wasm
+#
+# Verification:
+#   sha256sum -c manifest.sha256
+#
+# The manifest is uploaded as a workflow artifact on every run and attached
+# to GitHub Releases when triggered by a version tag (v*).
+
+on:
+  push:
+    branches: [main]
+    tags:
+      - 'v*'
+  pull_request:
+    branches: [main]
+
+jobs:
+  hash-manifest:
+    name: Build & Hash WASM Artifact
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: sla_calculator
+
+      - name: Build release WASM
+        run: cargo build --release --manifest-path sla_calculator/Cargo.toml --target wasm32-unknown-unknown
+
+      - name: Generate SHA-256 manifest
+        run: |
+          WASM=sla_calculator/target/wasm32-unknown-unknown/release/sla_calculator.wasm
+          sha256sum "$WASM" | awk '{print $1 "  sla_calculator.wasm"}' > manifest.sha256
+          echo "=== manifest.sha256 ==="
+          cat manifest.sha256
+          echo "=== artifact size ==="
+          wc -c < "$WASM"
+
+      - name: Verify manifest is self-consistent
+        run: |
+          # Copy the WASM next to the manifest and verify
+          cp sla_calculator/target/wasm32-unknown-unknown/release/sla_calculator.wasm .
+          sha256sum -c manifest.sha256
+          rm sla_calculator.wasm
+
+      - name: Upload manifest as workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-hash-manifest
+          path: |
+            manifest.sha256
+            sla_calculator/target/wasm32-unknown-unknown/release/sla_calculator.wasm
+          retention-days: 90
+
+      # Attach manifest to GitHub Release when triggered by a version tag
+      - name: Attach manifest to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            manifest.sha256
+            sla_calculator/target/wasm32-unknown-unknown/release/sla_calculator.wasm
