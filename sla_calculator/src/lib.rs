@@ -611,14 +611,8 @@ impl SLACalculatorContract {
         Self::check_version(&env)?;
 
         let mut entries = Vec::new(&env);
-        let severities = [
-            symbol_short!("critical"),
-            symbol_short!("high"),
-            symbol_short!("medium"),
-            symbol_short!("low"),
-        ];
 
-        for severity in severities {
+        for severity in Self::canonical_severities(&env) {
             let config = Self::load_config(&env, &severity)?;
             entries.push_back(SLAConfigEntry { severity, config });
         }
@@ -639,12 +633,7 @@ impl SLACalculatorContract {
     /// when config is unchanged.
     pub fn get_config_version_hash(env: Env) -> Result<u64, SLAError> {
         Self::check_version(&env)?;
-        let severities = [
-            symbol_short!("critical"),
-            symbol_short!("high"),
-            symbol_short!("medium"),
-            symbol_short!("low"),
-        ];
+        let severities = Self::canonical_severities(&env);
 
         // Polynomial rolling hash parameters for good collision resistance
         const BASE: u64 = 91138233; // Large prime number
@@ -709,11 +698,7 @@ impl SLACalculatorContract {
     /// #60 – Returns static contract capabilities for backend introspection.
     pub fn get_contract_metadata(env: Env) -> Result<ContractMetadata, SLAError> {
         Self::check_version(&env)?;
-        let mut severities = Vec::new(&env);
-        severities.push_back(symbol_short!("critical"));
-        severities.push_back(symbol_short!("high"));
-        severities.push_back(symbol_short!("medium"));
-        severities.push_back(symbol_short!("low"));
+        let severities = Self::canonical_severities(&env);
 
         let mut features = Vec::new(&env);
         features.push_back(symbol_short!("calc"));
@@ -838,8 +823,7 @@ impl SLACalculatorContract {
     // -------------------------------------------------------------------
 
     /// Pure helper to generate the SLAResult deterministically.
-    /// `recorded_at` is the ledger timestamp at call time for both view and mutating
-    /// execution so off-chain callers can rely on field parity within the same ledger.
+    /// `recorded_at` is the ledger timestamp at call time (0 in view/audit mode).
     fn compute_result(
         outage_id: Symbol,
         mttr_minutes: u32,
@@ -954,13 +938,7 @@ impl SLACalculatorContract {
         reward_base: i128,
     ) -> Result<(), SLAError> {
         // Validate severity is one of the supported values
-        let valid_severities = [
-            symbol_short!("critical"),
-            symbol_short!("high"),
-            symbol_short!("medium"),
-            symbol_short!("low"),
-        ];
-        if !valid_severities.contains(severity) {
+        if !Self::is_canonical_severity(severity) {
             return Err(SLAError::InvalidSeverity);
         }
 
@@ -1014,6 +992,33 @@ impl SLACalculatorContract {
         }
 
         Ok(())
+    }
+
+    fn canonical_severities(env: &Env) -> Vec<Symbol> {
+        let mut severities = Vec::new(env);
+        severities.push_back(symbol_short!("critical"));
+        severities.push_back(symbol_short!("high"));
+        severities.push_back(symbol_short!("medium"));
+        severities.push_back(symbol_short!("low"));
+        severities
+    }
+
+    fn canonical_severity_index(severity: &Symbol) -> Option<u32> {
+        if *severity == symbol_short!("critical") {
+            Some(0)
+        } else if *severity == symbol_short!("high") {
+            Some(1)
+        } else if *severity == symbol_short!("medium") {
+            Some(2)
+        } else if *severity == symbol_short!("low") {
+            Some(3)
+        } else {
+            None
+        }
+    }
+
+    fn is_canonical_severity(severity: &Symbol) -> bool {
+        Self::canonical_severity_index(severity).is_some()
     }
 
     /// Shared config lookup that borrows env (avoids consuming it).

@@ -99,19 +99,18 @@ fn test_config_snapshot_is_deterministic_and_complete() {
     assert_eq!(snapshot.version, symbol_short!("v1"));
     assert_eq!(snapshot.entries.len(), 4);
 
-    let critical = snapshot.entries.get(0).unwrap();
-    let high = snapshot.entries.get(1).unwrap();
-    let medium = snapshot.entries.get(2).unwrap();
-    let low = snapshot.entries.get(3).unwrap();
+    let expected = [
+        (symbol_short!("critical"), 15u32),
+        (symbol_short!("high"), 30u32),
+        (symbol_short!("medium"), 60u32),
+        (symbol_short!("low"), 120u32),
+    ];
 
-    assert_eq!(critical.severity, symbol_short!("critical"));
-    assert_eq!(critical.config.threshold_minutes, 15);
-    assert_eq!(high.severity, symbol_short!("high"));
-    assert_eq!(high.config.threshold_minutes, 30);
-    assert_eq!(medium.severity, symbol_short!("medium"));
-    assert_eq!(medium.config.threshold_minutes, 60);
-    assert_eq!(low.severity, symbol_short!("low"));
-    assert_eq!(low.config.threshold_minutes, 120);
+    for (i, (severity, threshold)) in expected.iter().enumerate() {
+        let entry = snapshot.entries.get(i as u32).unwrap();
+        assert_eq!(entry.severity, severity.clone());
+        assert_eq!(entry.config.threshold_minutes, *threshold);
+    }
 }
 
 #[test]
@@ -1023,6 +1022,43 @@ fn test_config_version_hash_is_deterministic() {
 }
 
 #[test]
+fn test_canonical_severity_order_is_aligned_across_snapshot_and_metadata() {
+    let (_env, client, _actors) = setup();
+
+    let snapshot = client.get_config_snapshot();
+    let metadata = client.get_contract_metadata();
+
+    assert_eq!(snapshot.entries.len(), metadata.supported_severities.len());
+
+    for i in 0..snapshot.entries.len() {
+        let snapshot_severity = snapshot.entries.get(i).unwrap().severity;
+        let metadata_severity = metadata.supported_severities.get(i).unwrap();
+        assert_eq!(snapshot_severity, metadata_severity);
+    }
+}
+
+#[test]
+fn test_canonical_severity_order_survives_config_updates() {
+    let (_env, client, actors) = setup();
+
+    client.set_config(&actors.admin, &symbol_short!("low"), &240, &15, &900);
+    client.set_config(&actors.admin, &symbol_short!("critical"), &20, &150, &800);
+
+    let snapshot = client.get_config_snapshot();
+    let expected = [
+        symbol_short!("critical"),
+        symbol_short!("high"),
+        symbol_short!("medium"),
+        symbol_short!("low"),
+    ];
+
+    for (i, severity) in expected.iter().enumerate() {
+        let entry = snapshot.entries.get(i as u32).unwrap();
+        assert_eq!(entry.severity, severity.clone());
+    }
+}
+
+#[test]
 fn test_config_version_hash_changes_on_update() {
     let (_env, client, actors) = setup();
     let before = client.get_config_version_hash();
@@ -1521,22 +1557,19 @@ fn test_get_contract_metadata_returns_expected_fields() {
 fn test_get_contract_metadata_severities_are_canonical() {
     let (_env, client, _actors) = setup();
     let meta = client.get_contract_metadata();
-    assert_eq!(
-        meta.supported_severities.get(0).unwrap(),
-        symbol_short!("critical")
-    );
-    assert_eq!(
-        meta.supported_severities.get(1).unwrap(),
-        symbol_short!("high")
-    );
-    assert_eq!(
-        meta.supported_severities.get(2).unwrap(),
-        symbol_short!("medium")
-    );
-    assert_eq!(
-        meta.supported_severities.get(3).unwrap(),
-        symbol_short!("low")
-    );
+    let expected = [
+        symbol_short!("critical"),
+        symbol_short!("high"),
+        symbol_short!("medium"),
+        symbol_short!("low"),
+    ];
+
+    for (i, severity) in expected.iter().enumerate() {
+        assert_eq!(
+            meta.supported_severities.get(i as u32).unwrap(),
+            severity.clone()
+        );
+    }
 }
 
 #[test]
@@ -1547,6 +1580,7 @@ fn test_get_contract_metadata_is_deterministic() {
     assert_eq!(m1.storage_version, m2.storage_version);
     assert_eq!(m1.result_schema_version, m2.result_schema_version);
     assert_eq!(m1.contract_name, m2.contract_name);
+    assert_eq!(m1.supported_severities, m2.supported_severities);
 }
 
 // ============================================================
