@@ -264,6 +264,29 @@ fn test_stranger_cannot_set_config() {
     );
 }
 
+#[test]
+fn test_storage_key_namespace_symbols_are_distinct() {
+    let keys = [
+        ADMIN_KEY,
+        OPERATOR_KEY,
+        PENDING_ADMIN_KEY,
+        PENDING_OP_KEY,
+        CONFIG_KEY,
+        PAUSED_KEY,
+        PAUSE_INFO_KEY,
+        STATS_KEY,
+        HISTORY_KEY,
+        STORAGE_VERSION_KEY,
+        RETENTION_LIMIT_KEY,
+    ];
+
+    for i in 0..keys.len() {
+        for j in (i + 1)..keys.len() {
+            assert_ne!(keys[i], keys[j]);
+        }
+    }
+}
+
 // ============================================================
 // #28 – calculate_sla: operator only
 // ============================================================
