@@ -1195,7 +1195,14 @@ impl SLACalculatorContract {
         Ok(hash.wrapping_mul(BASE).wrapping_add(0x9e3779b97f4a7c15u64) % MODULUS)
     }
 
+    /// Optimised config lookup with severity index pre-check for early rejection.
+    /// Skips the storage read when the severity is not one of the four canonical
+    /// values, avoiding an unnecessary Map deserialisation for invalid inputs.
     fn load_config(env: &Env, severity: &Symbol) -> Result<SLAConfig, SLAError> {
+        // Early rejection for non-canonical severities — avoids storage read.
+        if !Self::is_canonical_severity(severity) {
+            return Err(SLAError::ConfigNotFound);
+        }
         let configs: Map<Symbol, SLAConfig> = env
             .storage()
             .instance()
