@@ -158,7 +158,11 @@ mod tests {
 
         for i in 0..names.len() {
             for j in (i + 1)..names.len() {
-                assert_ne!(names[i], names[j], "event name collision: {:?} == {:?}", names[i], names[j]);
+                assert_ne!(
+                    names[i], names[j],
+                    "event name collision: {:?} == {:?}",
+                    names[i], names[j]
+                );
             }
         }
     }

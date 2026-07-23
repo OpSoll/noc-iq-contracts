@@ -36,7 +36,12 @@ mod coordination_harness_tests {
     // -----------------------------------------------------------------------
     // Helper: build a mock peer info
     // -----------------------------------------------------------------------
-    fn peer_info(name: &str, protocol: u32, storage: u32, min_compat: u32) -> VersionNegotiationInfo {
+    fn peer_info(
+        name: &str,
+        protocol: u32,
+        storage: u32,
+        min_compat: u32,
+    ) -> VersionNegotiationInfo {
         VersionNegotiationInfo {
             contract_name: Symbol::new(&Env::default(), name),
             protocol_version: protocol,

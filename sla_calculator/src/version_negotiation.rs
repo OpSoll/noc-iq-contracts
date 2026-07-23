@@ -238,7 +238,10 @@ mod tests {
         assert_eq!(result.outcome, NegotiationOutcome::Incompatible);
         assert_eq!(result.summary, symbol_short!("incompt"));
         assert_eq!(result.mismatches.len(), 1);
-        assert_eq!(result.mismatches.get(0).unwrap().contract_name, symbol_short!("pay_escro"));
+        assert_eq!(
+            result.mismatches.get(0).unwrap().contract_name,
+            symbol_short!("pay_escro")
+        );
     }
 
     #[test]

@@ -3573,7 +3573,10 @@ fn test_stored_result_retains_original_config_binding_after_config_change() {
     assert_eq!(stored_after_change.config_version_hash, original_hash);
     assert_ne!(original_hash, after_hash);
     assert_eq!(replayed_after_change.config_version_hash, after_hash);
-    assert_eq!(stored_after_change.recorded_at, replayed_after_change.recorded_at);
+    assert_eq!(
+        stored_after_change.recorded_at,
+        replayed_after_change.recorded_at
+    );
 }
 
 #[test]
@@ -3621,7 +3624,10 @@ fn test_get_version_info_returns_correct_versions_after_init() {
 #[test]
 fn test_get_version_info_reflects_paused_state() {
     let (env, client, actors) = setup();
-    client.pause(&actors.admin, &soroban_sdk::String::from_str(&env, "upgrade"));
+    client.pause(
+        &actors.admin,
+        &soroban_sdk::String::from_str(&env, "upgrade"),
+    );
     let info = client.get_version_info();
     assert!(info.is_paused);
     assert!(!info.needs_migration);
@@ -3648,8 +3654,18 @@ fn test_get_version_info_is_deterministic_across_repeated_calls() {
 fn test_get_version_info_not_affected_by_sla_calculations() {
     let (_env, client, actors) = setup();
     let before = client.get_version_info();
-    client.calculate_sla(&actors.operator, &symbol_short!("OUT1"), &symbol_short!("high"), &10);
-    client.calculate_sla(&actors.operator, &symbol_short!("OUT2"), &symbol_short!("critical"), &20);
+    client.calculate_sla(
+        &actors.operator,
+        &symbol_short!("OUT1"),
+        &symbol_short!("high"),
+        &10,
+    );
+    client.calculate_sla(
+        &actors.operator,
+        &symbol_short!("OUT2"),
+        &symbol_short!("critical"),
+        &20,
+    );
     let after = client.get_version_info();
     assert_eq!(before.storage_version, after.storage_version);
     assert_eq!(before.result_schema_version, after.result_schema_version);
@@ -4996,10 +5012,7 @@ fn test_error_unauthorized_is_terminal_for_stranger() {
 #[test]
 fn test_error_unauthorized_operator_calling_admin_fn_is_terminal() {
     let (_env, client, actors) = setup();
-    let result = client.try_pause(
-        &actors.operator,
-        &soroban_sdk::String::from_str(&_env, "x"),
-    );
+    let result = client.try_pause(&actors.operator, &soroban_sdk::String::from_str(&_env, "x"));
     assert_eq!(result.unwrap_err().unwrap(), SLAError::Unauthorized);
 }
 
@@ -5007,13 +5020,7 @@ fn test_error_unauthorized_operator_calling_admin_fn_is_terminal() {
 fn test_error_invalid_threshold_is_terminal() {
     let (_env, client, actors) = setup();
     // threshold=0 is always invalid for any severity
-    let result = client.try_set_config(
-        &actors.admin,
-        &symbol_short!("low"),
-        &0,
-        &10,
-        &600,
-    );
+    let result = client.try_set_config(&actors.admin, &symbol_short!("low"), &0, &10, &600);
     assert_eq!(result.unwrap_err().unwrap(), SLAError::InvalidThreshold);
 }
 
@@ -5021,13 +5028,7 @@ fn test_error_invalid_threshold_is_terminal() {
 fn test_error_invalid_penalty_is_terminal() {
     let (_env, client, actors) = setup();
     // penalty=0 is always invalid
-    let result = client.try_set_config(
-        &actors.admin,
-        &symbol_short!("low"),
-        &120,
-        &0,
-        &600,
-    );
+    let result = client.try_set_config(&actors.admin, &symbol_short!("low"), &120, &0, &600);
     assert_eq!(result.unwrap_err().unwrap(), SLAError::InvalidPenalty);
 }
 
@@ -5035,26 +5036,14 @@ fn test_error_invalid_penalty_is_terminal() {
 fn test_error_invalid_reward_is_terminal() {
     let (_env, client, actors) = setup();
     // reward=0 is always invalid
-    let result = client.try_set_config(
-        &actors.admin,
-        &symbol_short!("low"),
-        &120,
-        &10,
-        &0,
-    );
+    let result = client.try_set_config(&actors.admin, &symbol_short!("low"), &120, &10, &0);
     assert_eq!(result.unwrap_err().unwrap(), SLAError::InvalidReward);
 }
 
 #[test]
 fn test_error_invalid_severity_is_terminal() {
     let (env, client, actors) = setup();
-    let result = client.try_set_config(
-        &actors.admin,
-        &symbol_short!("bogus"),
-        &30,
-        &50,
-        &500,
-    );
+    let result = client.try_set_config(&actors.admin, &symbol_short!("bogus"), &30, &50, &500);
     assert_eq!(result.unwrap_err().unwrap(), SLAError::InvalidSeverity);
 }
 
@@ -5080,7 +5069,10 @@ fn test_error_contract_paused_is_retryable_after_unpause() {
         &symbol_short!("high"),
         &10,
     );
-    assert_eq!(paused_result.unwrap_err().unwrap(), SLAError::ContractPaused);
+    assert_eq!(
+        paused_result.unwrap_err().unwrap(),
+        SLAError::ContractPaused
+    );
 
     client.unpause(&actors.admin);
     let ok = client.calculate_sla(
@@ -5136,13 +5128,7 @@ fn test_failed_set_config_leaves_config_unchanged() {
     let before = client.get_config(&symbol_short!("critical"));
 
     // Invalid: threshold=0 for critical
-    let _ = client.try_set_config(
-        &actors.admin,
-        &symbol_short!("critical"),
-        &0,
-        &100,
-        &750,
-    );
+    let _ = client.try_set_config(&actors.admin, &symbol_short!("critical"), &0, &100, &750);
 
     assert_eq!(client.get_config(&symbol_short!("critical")), before);
 }
@@ -5152,10 +5138,7 @@ fn test_failed_calculate_sla_when_paused_leaves_stats_unchanged() {
     let (_env, client, actors) = setup();
     let stats_before = client.get_stats();
 
-    client.pause(
-        &actors.admin,
-        &soroban_sdk::String::from_str(&_env, "test"),
-    );
+    client.pause(&actors.admin, &soroban_sdk::String::from_str(&_env, "test"));
     let _ = client.try_calculate_sla(
         &actors.operator,
         &symbol_short!("INC_X"),
@@ -5165,7 +5148,10 @@ fn test_failed_calculate_sla_when_paused_leaves_stats_unchanged() {
 
     client.unpause(&actors.admin);
     let stats_after = client.get_stats();
-    assert_eq!(stats_before.total_calculations, stats_after.total_calculations);
+    assert_eq!(
+        stats_before.total_calculations,
+        stats_after.total_calculations
+    );
     assert_eq!(stats_before.total_violations, stats_after.total_violations);
 }
 
@@ -5174,10 +5160,7 @@ fn test_failed_calculate_sla_when_paused_leaves_history_unchanged() {
     let (_env, client, actors) = setup();
     let history_before = client.get_history();
 
-    client.pause(
-        &actors.admin,
-        &soroban_sdk::String::from_str(&_env, "test"),
-    );
+    client.pause(&actors.admin, &soroban_sdk::String::from_str(&_env, "test"));
     let _ = client.try_calculate_sla(
         &actors.operator,
         &symbol_short!("INC_Y"),
@@ -5202,7 +5185,10 @@ fn test_failed_calculate_sla_unauthorized_leaves_stats_unchanged() {
     );
 
     let stats_after = client.get_stats();
-    assert_eq!(stats_before.total_calculations, stats_after.total_calculations);
+    assert_eq!(
+        stats_before.total_calculations,
+        stats_after.total_calculations
+    );
 }
 
 #[test]
@@ -5251,10 +5237,7 @@ fn test_failed_pause_unauthorized_leaves_pause_state_unchanged() {
     let (_env, client, actors) = setup();
     assert_eq!(client.is_paused(), false);
 
-    let _ = client.try_pause(
-        &actors.stranger,
-        &soroban_sdk::String::from_str(&_env, "x"),
-    );
+    let _ = client.try_pause(&actors.stranger, &soroban_sdk::String::from_str(&_env, "x"));
 
     assert_eq!(client.is_paused(), false);
 }
@@ -5282,14 +5265,12 @@ fn test_stats_total_calculations_is_monotonically_increasing() {
         symbol_short!("MON5"),
     ];
     for oid in oids.iter() {
-        client.calculate_sla(
-            &actors.operator,
-            oid,
-            &symbol_short!("high"),
-            &10,
-        );
+        client.calculate_sla(&actors.operator, oid, &symbol_short!("high"), &10);
         let curr = client.get_stats().total_calculations;
-        assert!(curr > prev, "total_calculations must increase after each call");
+        assert!(
+            curr > prev,
+            "total_calculations must increase after each call"
+        );
         prev = curr;
     }
 }
@@ -5306,14 +5287,12 @@ fn test_stats_total_violations_is_monotonically_increasing() {
         symbol_short!("VIO3"),
     ];
     for oid in oids.iter() {
-        client.calculate_sla(
-            &actors.operator,
-            oid,
-            &symbol_short!("high"),
-            &50,
-        );
+        client.calculate_sla(&actors.operator, oid, &symbol_short!("high"), &50);
         let curr = client.get_stats().total_violations;
-        assert!(curr > prev, "total_violations must increase on each violation");
+        assert!(
+            curr > prev,
+            "total_violations must increase on each violation"
+        );
         prev = curr;
     }
 }
@@ -5324,12 +5303,12 @@ fn test_stats_conservation_total_calculations_equals_met_plus_violations() {
 
     // Mix of met and violated calculations
     let inputs: &[(u32, &str, &str)] = &[
-        (5,  "high",     "C0"),
-        (35, "high",     "C1"),
+        (5, "high", "C0"),
+        (35, "high", "C1"),
         (10, "critical", "C2"),
         (20, "critical", "C3"),
-        (50, "medium",   "C4"),
-        (70, "medium",   "C5"),
+        (50, "medium", "C4"),
+        (70, "medium", "C5"),
     ];
 
     for (mttr, sev, oid) in inputs.iter() {
@@ -5365,7 +5344,10 @@ fn test_stats_total_rewards_only_increases_on_met() {
         &5,
     );
     let after = client.get_stats().total_rewards;
-    assert!(after > before, "total_rewards must increase after a met SLA");
+    assert!(
+        after > before,
+        "total_rewards must increase after a met SLA"
+    );
 }
 
 #[test]
@@ -5381,7 +5363,10 @@ fn test_stats_total_penalties_only_increases_on_violation() {
         &50,
     );
     let after = client.get_stats().total_penalties;
-    assert!(after > before, "total_penalties must increase after a violation");
+    assert!(
+        after > before,
+        "total_penalties must increase after a violation"
+    );
 }
 
 #[test]
@@ -5433,17 +5418,17 @@ fn test_stats_conservation_holds_after_many_mixed_calculations() {
     let mut expected_violations: u64 = 0;
     for i in 1u32..=20 {
         let mttr = i * 3; // alternates met/viol for high (threshold=30)
-        // Use a fixed set of outage IDs cycling through 20 symbols
+                          // Use a fixed set of outage IDs cycling through 20 symbols
         let oid = match i {
-            1  => symbol_short!("M01"),
-            2  => symbol_short!("M02"),
-            3  => symbol_short!("M03"),
-            4  => symbol_short!("M04"),
-            5  => symbol_short!("M05"),
-            6  => symbol_short!("M06"),
-            7  => symbol_short!("M07"),
-            8  => symbol_short!("M08"),
-            9  => symbol_short!("M09"),
+            1 => symbol_short!("M01"),
+            2 => symbol_short!("M02"),
+            3 => symbol_short!("M03"),
+            4 => symbol_short!("M04"),
+            5 => symbol_short!("M05"),
+            6 => symbol_short!("M06"),
+            7 => symbol_short!("M07"),
+            8 => symbol_short!("M08"),
+            9 => symbol_short!("M09"),
             10 => symbol_short!("M10"),
             11 => symbol_short!("M11"),
             12 => symbol_short!("M12"),
@@ -5454,7 +5439,7 @@ fn test_stats_conservation_holds_after_many_mixed_calculations() {
             17 => symbol_short!("M17"),
             18 => symbol_short!("M18"),
             19 => symbol_short!("M19"),
-            _  => symbol_short!("M20"),
+            _ => symbol_short!("M20"),
         };
         client.calculate_sla(&op, &oid, &symbol_short!("high"), &mttr);
         if mttr > 30 {
@@ -5516,14 +5501,14 @@ fn test_no_result_has_penalty_type_with_positive_amount() {
     let (_env, client, actors) = setup();
     // Run several calculations and verify the invariant on each
     let cases: &[(u32, &str, &str)] = &[
-        (5,   "critical", "EX10"),
-        (20,  "critical", "EX11"),
-        (10,  "high",     "EX12"),
-        (40,  "high",     "EX13"),
-        (30,  "medium",   "EX14"),
-        (70,  "medium",   "EX15"),
-        (60,  "low",      "EX16"),
-        (130, "low",      "EX17"),
+        (5, "critical", "EX10"),
+        (20, "critical", "EX11"),
+        (10, "high", "EX12"),
+        (40, "high", "EX13"),
+        (30, "medium", "EX14"),
+        (70, "medium", "EX15"),
+        (60, "low", "EX16"),
+        (130, "low", "EX17"),
     ];
     for (mttr, sev, oid) in cases.iter() {
         let result = client.calculate_sla(
@@ -5545,14 +5530,14 @@ fn test_no_result_has_penalty_type_with_positive_amount() {
 fn test_no_result_has_reward_type_with_non_positive_amount() {
     let (_env, client, actors) = setup();
     let cases: &[(u32, &str, &str)] = &[
-        (1,   "critical", "EX20"),
-        (14,  "critical", "EX21"),
-        (1,   "high",     "EX22"),
-        (29,  "high",     "EX23"),
-        (1,   "medium",   "EX24"),
-        (59,  "medium",   "EX25"),
-        (1,   "low",      "EX26"),
-        (119, "low",      "EX27"),
+        (1, "critical", "EX20"),
+        (14, "critical", "EX21"),
+        (1, "high", "EX22"),
+        (29, "high", "EX23"),
+        (1, "medium", "EX24"),
+        (59, "medium", "EX25"),
+        (1, "low", "EX26"),
+        (119, "low", "EX27"),
     ];
     for (mttr, sev, oid) in cases.iter() {
         let result = client.calculate_sla(
@@ -5578,7 +5563,10 @@ fn test_254_threshold_upper_bound_accepted() {
     // threshold_minutes == 1440 (24 h) is the maximum allowed value.
     let (_env, client, actors) = setup();
     client.set_config(&actors.admin, &symbol_short!("low"), &1440, &10, &600);
-    assert_eq!(client.get_config(&symbol_short!("low")).threshold_minutes, 1440);
+    assert_eq!(
+        client.get_config(&symbol_short!("low")).threshold_minutes,
+        1440
+    );
 }
 
 #[test]
@@ -5661,7 +5649,9 @@ fn test_254_invalid_config_does_not_corrupt_existing() {
     let original = client.get_config(&symbol_short!("critical"));
     let _ = client.try_set_config(&actors.admin, &symbol_short!("critical"), &0, &100, &750);
     assert_eq!(
-        client.get_config(&symbol_short!("critical")).threshold_minutes,
+        client
+            .get_config(&symbol_short!("critical"))
+            .threshold_minutes,
         original.threshold_minutes
     );
 }
@@ -5683,7 +5673,12 @@ fn test_255_history_grows_monotonically() {
             &symbol_short!("high"),
             &10,
         );
-        assert_eq!(client.get_history().len(), i, "history length after call {}", i);
+        assert_eq!(
+            client.get_history().len(),
+            i,
+            "history length after call {}",
+            i
+        );
     }
 }
 
@@ -5702,17 +5697,36 @@ fn test_255_history_order_is_insertion_order() {
     }
     let history = client.get_history();
     assert_eq!(history.len(), 3);
-    assert_eq!(history.get(0).unwrap().outage_id, soroban_sdk::Symbol::new(&env, "A"));
-    assert_eq!(history.get(1).unwrap().outage_id, soroban_sdk::Symbol::new(&env, "B"));
-    assert_eq!(history.get(2).unwrap().outage_id, soroban_sdk::Symbol::new(&env, "C"));
+    assert_eq!(
+        history.get(0).unwrap().outage_id,
+        soroban_sdk::Symbol::new(&env, "A")
+    );
+    assert_eq!(
+        history.get(1).unwrap().outage_id,
+        soroban_sdk::Symbol::new(&env, "B")
+    );
+    assert_eq!(
+        history.get(2).unwrap().outage_id,
+        soroban_sdk::Symbol::new(&env, "C")
+    );
 }
 
 #[test]
 fn test_255_duplicate_outage_id_is_idempotent() {
     // Submitting the same outage_id with identical inputs must not add a second entry.
     let (_env, client, actors) = setup();
-    client.calculate_sla(&actors.operator, &symbol_short!("DUP"), &symbol_short!("high"), &10);
-    client.calculate_sla(&actors.operator, &symbol_short!("DUP"), &symbol_short!("high"), &10);
+    client.calculate_sla(
+        &actors.operator,
+        &symbol_short!("DUP"),
+        &symbol_short!("high"),
+        &10,
+    );
+    client.calculate_sla(
+        &actors.operator,
+        &symbol_short!("DUP"),
+        &symbol_short!("high"),
+        &10,
+    );
     assert_eq!(client.get_history().len(), 1);
 }
 
@@ -5721,8 +5735,18 @@ fn test_255_duplicate_outage_id_is_idempotent() {
 fn test_255_duplicate_outage_id_with_different_mttr_panics() {
     // Same outage_id but different mttr_minutes must panic (mismatched inputs).
     let (_env, client, actors) = setup();
-    client.calculate_sla(&actors.operator, &symbol_short!("DUP"), &symbol_short!("high"), &10);
-    client.calculate_sla(&actors.operator, &symbol_short!("DUP"), &symbol_short!("high"), &20);
+    client.calculate_sla(
+        &actors.operator,
+        &symbol_short!("DUP"),
+        &symbol_short!("high"),
+        &10,
+    );
+    client.calculate_sla(
+        &actors.operator,
+        &symbol_short!("DUP"),
+        &symbol_short!("high"),
+        &20,
+    );
 }
 
 #[test]
@@ -5770,13 +5794,21 @@ fn test_255_history_page_offset_and_limit() {
     }
     let page = client.get_history_page(&2, &3);
     assert_eq!(page.len(), 3);
-    assert_eq!(page.get(0).unwrap().outage_id, soroban_sdk::Symbol::new(&env, "O3"));
+    assert_eq!(
+        page.get(0).unwrap().outage_id,
+        soroban_sdk::Symbol::new(&env, "O3")
+    );
 }
 
 #[test]
 fn test_255_history_page_beyond_end_returns_empty() {
     let (_env, client, actors) = setup();
-    client.calculate_sla(&actors.operator, &symbol_short!("O1"), &symbol_short!("high"), &10);
+    client.calculate_sla(
+        &actors.operator,
+        &symbol_short!("O1"),
+        &symbol_short!("high"),
+        &10,
+    );
     let page = client.get_history_page(&100, &10);
     assert_eq!(page.len(), 0);
 }
@@ -5789,16 +5821,32 @@ fn test_255_history_page_beyond_end_returns_empty() {
 #[should_panic]
 fn test_256_calculate_sla_blocked_when_paused() {
     let (env, client, actors) = setup();
-    client.pause(&actors.admin, &soroban_sdk::String::from_str(&env, "maintenance"));
-    client.calculate_sla(&actors.operator, &symbol_short!("O1"), &symbol_short!("high"), &10);
+    client.pause(
+        &actors.admin,
+        &soroban_sdk::String::from_str(&env, "maintenance"),
+    );
+    client.calculate_sla(
+        &actors.operator,
+        &symbol_short!("O1"),
+        &symbol_short!("high"),
+        &10,
+    );
 }
 
 #[test]
 fn test_256_calculate_sla_allowed_after_unpause() {
     let (env, client, actors) = setup();
-    client.pause(&actors.admin, &soroban_sdk::String::from_str(&env, "maintenance"));
+    client.pause(
+        &actors.admin,
+        &soroban_sdk::String::from_str(&env, "maintenance"),
+    );
     client.unpause(&actors.admin);
-    let result = client.calculate_sla(&actors.operator, &symbol_short!("O1"), &symbol_short!("high"), &10);
+    let result = client.calculate_sla(
+        &actors.operator,
+        &symbol_short!("O1"),
+        &symbol_short!("high"),
+        &10,
+    );
     assert_eq!(result.status, symbol_short!("met"));
 }
 
@@ -5806,39 +5854,81 @@ fn test_256_calculate_sla_allowed_after_unpause() {
 fn test_256_set_config_allowed_while_paused() {
     // Admin config updates must succeed even when the contract is paused.
     let (env, client, actors) = setup();
-    client.pause(&actors.admin, &soroban_sdk::String::from_str(&env, "maintenance"));
+    client.pause(
+        &actors.admin,
+        &soroban_sdk::String::from_str(&env, "maintenance"),
+    );
     client.set_config(&actors.admin, &symbol_short!("low"), &120, &10, &600);
-    assert_eq!(client.get_config(&symbol_short!("low")).threshold_minutes, 120);
+    assert_eq!(
+        client.get_config(&symbol_short!("low")).threshold_minutes,
+        120
+    );
 }
 
 #[test]
 fn test_256_history_not_mutated_while_paused() {
     // History must not grow while the contract is paused.
     let (env, client, actors) = setup();
-    client.calculate_sla(&actors.operator, &symbol_short!("O1"), &symbol_short!("high"), &10);
+    client.calculate_sla(
+        &actors.operator,
+        &symbol_short!("O1"),
+        &symbol_short!("high"),
+        &10,
+    );
     let len_before = client.get_history().len();
-    client.pause(&actors.admin, &soroban_sdk::String::from_str(&env, "maintenance"));
-    let _ = client.try_calculate_sla(&actors.operator, &symbol_short!("O2"), &symbol_short!("high"), &10);
-    assert_eq!(client.get_history().len(), len_before, "history must not grow while paused");
+    client.pause(
+        &actors.admin,
+        &soroban_sdk::String::from_str(&env, "maintenance"),
+    );
+    let _ = client.try_calculate_sla(
+        &actors.operator,
+        &symbol_short!("O2"),
+        &symbol_short!("high"),
+        &10,
+    );
+    assert_eq!(
+        client.get_history().len(),
+        len_before,
+        "history must not grow while paused"
+    );
 }
 
 #[test]
 fn test_256_stats_not_mutated_while_paused() {
     // Stats must not change while the contract is paused.
     let (env, client, actors) = setup();
-    client.calculate_sla(&actors.operator, &symbol_short!("O1"), &symbol_short!("high"), &10);
+    client.calculate_sla(
+        &actors.operator,
+        &symbol_short!("O1"),
+        &symbol_short!("high"),
+        &10,
+    );
     let stats_before = client.get_stats();
-    client.pause(&actors.admin, &soroban_sdk::String::from_str(&env, "maintenance"));
-    let _ = client.try_calculate_sla(&actors.operator, &symbol_short!("O2"), &symbol_short!("high"), &10);
+    client.pause(
+        &actors.admin,
+        &soroban_sdk::String::from_str(&env, "maintenance"),
+    );
+    let _ = client.try_calculate_sla(
+        &actors.operator,
+        &symbol_short!("O2"),
+        &symbol_short!("high"),
+        &10,
+    );
     let stats_after = client.get_stats();
-    assert_eq!(stats_before.total_calculations, stats_after.total_calculations);
+    assert_eq!(
+        stats_before.total_calculations,
+        stats_after.total_calculations
+    );
 }
 
 #[test]
 fn test_256_calculate_sla_view_allowed_while_paused() {
     // The read-only audit view must remain accessible while paused.
     let (env, client, actors) = setup();
-    client.pause(&actors.admin, &soroban_sdk::String::from_str(&env, "maintenance"));
+    client.pause(
+        &actors.admin,
+        &soroban_sdk::String::from_str(&env, "maintenance"),
+    );
     let result = client.calculate_sla_view(&symbol_short!("O1"), &symbol_short!("high"), &10);
     assert_eq!(result.status, symbol_short!("met"));
 }
@@ -5847,14 +5937,20 @@ fn test_256_calculate_sla_view_allowed_while_paused() {
 #[should_panic]
 fn test_256_stranger_cannot_pause() {
     let (env, client, actors) = setup();
-    client.pause(&actors.stranger, &soroban_sdk::String::from_str(&env, "unauthorized"));
+    client.pause(
+        &actors.stranger,
+        &soroban_sdk::String::from_str(&env, "unauthorized"),
+    );
 }
 
 #[test]
 #[should_panic]
 fn test_256_operator_cannot_pause() {
     let (env, client, actors) = setup();
-    client.pause(&actors.operator, &soroban_sdk::String::from_str(&env, "unauthorized"));
+    client.pause(
+        &actors.operator,
+        &soroban_sdk::String::from_str(&env, "unauthorized"),
+    );
 }
 
 // ============================================================
@@ -5944,14 +6040,14 @@ fn test_exclusivity_status_and_payment_type_are_consistent() {
     // met ↔ rew, viol ↔ pen — no cross-pairing allowed
     let (_env, client, actors) = setup();
     let cases: &[(u32, &str, &str)] = &[
-        (5,   "critical", "EX30"),
-        (20,  "critical", "EX31"),
-        (10,  "high",     "EX32"),
-        (40,  "high",     "EX33"),
-        (30,  "medium",   "EX34"),
-        (70,  "medium",   "EX35"),
-        (60,  "low",      "EX36"),
-        (130, "low",      "EX37"),
+        (5, "critical", "EX30"),
+        (20, "critical", "EX31"),
+        (10, "high", "EX32"),
+        (40, "high", "EX33"),
+        (30, "medium", "EX34"),
+        (70, "medium", "EX35"),
+        (60, "low", "EX36"),
+        (130, "low", "EX37"),
     ];
     for (mttr, sev, oid) in cases.iter() {
         let result = client.calculate_sla(
@@ -5982,11 +6078,7 @@ fn test_exclusivity_view_mode_matches_mutating_mode() {
     // calculate_sla_view must produce the same payment_type/amount sign as calculate_sla
     let (_env, client, actors) = setup();
 
-    let view = client.calculate_sla_view(
-        &symbol_short!("VIEW1"),
-        &symbol_short!("high"),
-        &50,
-    );
+    let view = client.calculate_sla_view(&symbol_short!("VIEW1"), &symbol_short!("high"), &50);
     let calc = client.calculate_sla(
         &actors.operator,
         &symbol_short!("VIEW1"),

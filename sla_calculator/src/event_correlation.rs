@@ -39,7 +39,11 @@ pub const CORRELATION_TOPIC: Symbol = symbol_short!("corr_id");
 ///
 /// Uses a simple hash: rotate the outage_id hash bits, then XOR with the
 /// ledger sequence to incorporate temporal uniqueness.
-pub fn generate_correlation_id(env: &Env, outage_id: &Symbol, ledger_sequence: u32) -> CorrelationId {
+pub fn generate_correlation_id(
+    env: &Env,
+    outage_id: &Symbol,
+    ledger_sequence: u32,
+) -> CorrelationId {
     let id_bytes = outage_id.to_string().as_bytes().to_vec();
     let mut hash: u64 = 0xcbf29ce484222325; // FNV-1a offset basis
     for b in id_bytes {
