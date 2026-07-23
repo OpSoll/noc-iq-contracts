@@ -63,16 +63,36 @@ Tests live in:
 
 ```text
 noc-iq-contracts/
-├── docs/
+├── .github/
+│   └── workflows/
+│       ├── ci.yml           # build, test, clippy, no-std check, WASM size
+│       ├── release-hash.yml # WASM SHA-256 manifest for reproducibility
+│       └── security.yml     # cargo-audit dependency advisory scan
+├── artifacts/               # deployment and contract metadata artifacts
+├── docs/                    # architecture docs and context files
 │   ├── CODEX_CONTEXT.md
-│   └── PROJECT_CONTEXT.md
-├── sla_calculator/
+│   ├── PROJECT_CONTEXT.md
+│   ├── config-validation.md
+│   ├── contract-module-map.md
+│   ├── contributor-verification-guide.md
+│   └── sc-w5-storage-and-cost-baselines.md
+├── offchain/                # TypeScript off-chain integration helpers
+├── pers-store/              # persistent storage helpers
+├── scripts/                 # deployment, migration, and tooling scripts
+├── sla_calculator/          # main Soroban contract crate
 │   ├── Cargo.toml
 │   └── src/
-│       ├── lib.rs
-│       └── tests.rs
+│       ├── lib.rs           # contract entry point
+│       ├── tests.rs         # unit and integration tests
+│       └── (module files)   # event schema, cross-contract safety, etc.
+├── tests/                   # TypeScript parity and integration tests
+├── tooling/                 # CI tooling and governance helpers
+├── tools/                   # developer utility scripts
+├── ts/                      # TypeScript contract interface helpers
+├── Cargo.toml               # workspace manifest
+├── CHANGELOG.md
 ├── CONTRIBUTING.md
-├── README.md
+└── README.md
 ```
 
 ## What Is Actually In This Repo
