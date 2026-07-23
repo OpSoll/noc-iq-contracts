@@ -1,6 +1,7 @@
 # Rust
 target/
-Cargo.lock
+# Note: Cargo.lock is intentionally tracked for WASM reproducibility.
+# See: https://doc.rust-lang.org/cargo/faq.html#why-have-cargolock-in-version-control
 
 # Soroban
 test_snapshots/
