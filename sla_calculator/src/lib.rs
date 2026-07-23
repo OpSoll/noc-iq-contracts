@@ -105,6 +105,8 @@ pub enum SLAError {
     DuplicateOutageInput = 13,     // SC-W5-046
     InvalidPenaltyAmount = 14,     // SC-W5-046
     InvalidRewardAmount = 15,      // SC-W5-046
+    InvalidOutageId = 16,          // SC-W5-077
+    MalformedSymbolInput = 17,     // SC-W5-077
 }
 
 // -----------------------------------------------------------------------
@@ -975,11 +977,7 @@ impl SLACalculatorContract {
             })
         } else {
             // Case 2: SLA met → reward
-            let performance_ratio = if threshold == 0 {
-                0
-            } else {
-                (mttr_minutes * 100) / threshold
-            };
+            let performance_ratio = (mttr_minutes * 100).checked_div(threshold).unwrap_or(0);
 
             let (multiplier, rating) = if performance_ratio < 50 {
                 (200u32, symbol_short!("top"))
@@ -1059,8 +1057,12 @@ impl SLACalculatorContract {
     /// Returns `InvalidSeverity` for config keys or `InvalidOutageId` for outage IDs
     /// when validation fails, allowing graceful degradation instead of panicking.
     fn validate_symbol_input(symbol: &Symbol, is_outage_id: bool) -> Result<(), SLAError> {
-        let s = symbol.to_string();
-        if s.len() == 0 || s.len() > 32 {
+        // In Soroban no_std, Symbol::to_string() is unavailable. A Symbol constructed
+        // from an empty string has payload 0 (TAG_SYMBOL with zero bits set).
+        // We can detect this by converting to Val and checking the payload.
+        // symbol_short!() always produces non-zero payloads for non-empty strings.
+        let payload = symbol.to_val().get_payload();
+        if payload == 0 {
             return Err(if is_outage_id {
                 SLAError::InvalidOutageId
             } else {
@@ -1507,7 +1509,6 @@ impl SLACalculatorContract {
 
     /// SC-021 – Migration state read helper
     // -------------------------------------------------------------------
-
     /// Returns the storage version and migration posture.
     ///
     /// Backend consumers should call this after any contract upgrade to confirm

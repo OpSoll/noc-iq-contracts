@@ -27,10 +27,11 @@
 //! on the SLA calculator are extended with this protocol so that multi-contract
 //! backends can verify all contracts agree before deploying.
 
-use soroban_sdk::{symbol_short, Address, Env, Symbol, Vec};
+use soroban_sdk::{contracttype, symbol_short, Env, Symbol, Vec};
 
 /// Version information for a single contract, designed to be returned by
 /// a standard `get_version_info()` function on any contract in the ecosystem.
+#[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VersionNegotiationInfo {
     /// Human-readable contract name for log correlation.
@@ -59,6 +60,7 @@ pub enum NegotiationOutcome {
 }
 
 /// Describes which contract(s) caused an incompatibility.
+#[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VersionMismatchDetail {
     /// The name of the contract that is out of range.
