@@ -11,6 +11,9 @@ pub struct SLACalculatorContract;
 #[cfg(test)]
 mod tests;
 
+#[cfg(test)]
+mod fuzz_tests;
+
 pub mod coordination_harness;
 pub mod cross_contract_safety;
 pub mod event_correlation;
