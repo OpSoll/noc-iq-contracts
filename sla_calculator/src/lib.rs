@@ -13,11 +13,14 @@ mod tests;
 
 #[cfg(test)]
 mod gas_profile;
+mod proptests;
 
 pub mod coordination_harness;
 pub mod cross_contract_safety;
+pub mod dispute;
 pub mod event_correlation;
 mod event_schema;
+pub mod multi_operator;
 pub mod version_negotiation;
 
 // -----------------------------------------------------------------------
@@ -89,32 +92,65 @@ const EVENT_VERSION: Symbol = symbol_short!("v1");
 // -----------------------------------------------------------------------
 // Errors
 // -----------------------------------------------------------------------
+
+/// SLA Calculator contract error codes.
+///
+/// Each variant maps to a unique `u32` discriminant used in Soroban error
+/// handling. The `get_failure_schema` endpoint exposes these codes with
+/// human-readable labels for backend bridge consumption.
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 #[repr(u32)]
 pub enum SLAError {
+    /// The contract has already been initialized. Re-initialization is not allowed.
     AlreadyInitialized = 1,
+    /// The contract has not been initialized. Call `initialize` first.
     NotInitialized = 2,
+    /// The caller lacks the required role (admin or operator) for this action.
     Unauthorized = 3,
+    /// No configuration exists for the requested severity tier.
     ConfigNotFound = 4,
+    /// Storage version mismatch. A migration is required before use.
     VersionMismatch = 5,
-    ContractPaused = 6,            // #27
-    NoPendingTransfer = 7,         // #63 #64
-    InvalidThreshold = 8,          // #70
-    InvalidPenalty = 9,            // #70
-    InvalidReward = 10,            // #70
-    InvalidSeverity = 11,          // #70
-    RetentionLimitOutOfRange = 12, // SC-013
-    DuplicateOutageInput = 13,     // SC-W5-046
-    InvalidPenaltyAmount = 14,     // SC-W5-046
-    InvalidRewardAmount = 15,      // SC-W5-046
-    InvalidOutageId = 16,          // SC-W5-077
-    MalformedSymbolInput = 17,     // SC-W5-077
+    /// The contract is paused. `calculate_sla` is blocked until unpaused.
+    ContractPaused = 6,
+    /// No pending admin/operator transfer exists to accept or cancel.
+    NoPendingTransfer = 7,
+    /// Configuration threshold is out of the allowed range (1..=1440 minutes).
+    InvalidThreshold = 8,
+    /// Configuration penalty per minute is out of the allowed range.
+    InvalidPenalty = 9,
+    /// Configuration reward base is out of the allowed range.
+    InvalidReward = 10,
+    /// The severity tier is not one of: critical, high, medium, low.
+    InvalidSeverity = 11,
+    /// Retention limit is out of range (must be 1..=1000).
+    RetentionLimitOutOfRange = 12,
+    /// A duplicate outage ID with conflicting inputs was submitted.
+    DuplicateOutageInput = 13,
+    /// The computed penalty amount is invalid (must be negative for violations).
+    InvalidPenaltyAmount = 14,
+    /// The computed reward amount is invalid (must be positive for SLA met).
+    InvalidRewardAmount = 15,
+    /// The outage ID symbol is empty or malformed.
+    InvalidOutageId = 16,
+    /// A required symbol input is empty or malformed.
+    MalformedSymbolInput = 17,
 }
 
 // -----------------------------------------------------------------------
 // Types
 // -----------------------------------------------------------------------
+
+/// SLA configuration for a single severity tier.
+///
+/// Defines the threshold, penalty rate, and reward base used when evaluating
+/// SLA compliance for outages at this severity level.
+///
+/// # Fields
+/// - `threshold_minutes`: Maximum acceptable mean time to resolution (MTTR) in minutes.
+/// - `penalty_per_minute`: Amount charged per minute of overtime when SLA is violated.
+/// - `reward_base`: Base reward amount awarded when SLA is met.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SLAConfig {
@@ -123,6 +159,22 @@ pub struct SLAConfig {
     pub reward_base: i128,
 }
 
+/// Result of an SLA calculation, persisted on-chain after evaluation.
+///
+/// Contains the full outcome including status, payment details, performance
+/// rating, and a config version hash binding the result to the exact
+/// configuration snapshot used during evaluation.
+///
+/// # Fields
+/// - `outage_id`: Unique identifier for the evaluated outage.
+/// - `status`: `"met"` if SLA was satisfied, `"viol"` if violated.
+/// - `mttr_minutes`: Actual mean time to resolution in minutes.
+/// - `threshold_minutes`: Config threshold used for evaluation.
+/// - `amount`: Payment amount (positive for rewards, negative for penalties).
+/// - `payment_type`: `"rew"` for reward, `"pen"` for penalty.
+/// - `rating`: Performance rating (`"top"`, `"excel"`, `"good"`, `"poor"`).
+/// - `config_version_hash`: Hash binding result to config snapshot at evaluation time.
+/// - `recorded_at`: Ledger timestamp when the calculation was recorded.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SLAResult {
@@ -137,6 +189,9 @@ pub struct SLAResult {
     pub recorded_at: u64,         // SC-063: ledger timestamp at calculation time
 }
 
+/// A single severity tier configuration entry within a snapshot.
+///
+/// Pairs a severity label with its corresponding SLA configuration values.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SLAConfigEntry {
@@ -144,6 +199,11 @@ pub struct SLAConfigEntry {
     pub config: SLAConfig,
 }
 
+/// Backend-friendly snapshot of all severity configurations.
+///
+/// Returned by `get_config_snapshot` in canonical severity order
+/// (critical → high → medium → low). The `version` field allows consumers
+/// to detect structural changes to the snapshot format across upgrades.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SLAConfigSnapshot {
@@ -151,6 +211,12 @@ pub struct SLAConfigSnapshot {
     pub entries: Vec<SLAConfigEntry>,
 }
 
+/// Schema describing the semantics of SLAResult fields.
+///
+/// Backend consumers call `get_result_schema` to obtain the mapping
+/// between symbolic field values (status, payment_type, rating) and
+/// their meanings. This allows safe evolution of the result format
+/// across contract upgrades.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SLAResultSchema {
@@ -414,6 +480,13 @@ impl SLACalculatorContract {
     // Role queries
     // -------------------------------------------------------------------
 
+    /// Returns the current admin address.
+    ///
+    /// The admin can update configuration, pause/unpause the contract,
+    /// manage operators, and perform governance actions.
+    ///
+    /// # Errors
+    /// Returns `NotInitialized` if the contract has not been initialized.
     pub fn get_admin(env: Env) -> Result<Address, SLAError> {
         Self::check_version(&env)?;
         env.storage()
@@ -630,6 +703,21 @@ impl SLACalculatorContract {
     // Config management (admin only)                                 #28
     // -------------------------------------------------------------------
 
+    /// Set or update SLA configuration for a given severity tier.
+    ///
+    /// Admin-only operation. Validates all parameters before writing to storage.
+    /// Emits a `cfg_upd` event on success.
+    ///
+    /// # Arguments
+    /// - `caller`: Must be the current admin address.
+    /// - `severity`: One of `critical`, `high`, `medium`, `low`.
+    /// - `threshold_minutes`: Maximum acceptable MTTR in minutes (1..=1440).
+    /// - `penalty_per_minute`: Amount charged per overtime minute (1..=10000).
+    /// - `reward_base`: Base reward for meeting SLA (1..=100000).
+    ///
+    /// # Errors
+    /// Returns `Unauthorized` if caller is not admin, or validation errors
+    /// if parameters are out of range for the specified severity.
     pub fn set_config(
         env: Env,
         caller: Address,
@@ -672,11 +760,21 @@ impl SLACalculatorContract {
         Ok(())
     }
 
+    /// Returns the SLA configuration for a specific severity tier.
+    ///
+    /// # Arguments
+    /// - `severity`: One of `critical`, `high`, `medium`, `low`.
+    ///
+    /// # Errors
+    /// Returns `ConfigNotFound` if no config exists for the given severity.
     pub fn get_config(env: Env, severity: Symbol) -> Result<SLAConfig, SLAError> {
         Self::check_version(&env)?;
         Self::load_config(&env, &severity)
     }
 
+    /// Returns all severity configurations as a map from severity to config.
+    ///
+    /// Useful for backends that need to inspect the full configuration state.
     pub fn list_configs(env: Env) -> Result<Map<Symbol, SLAConfig>, SLAError> {
         Self::check_version(&env)?;
         env.storage()
@@ -767,6 +865,11 @@ impl SLACalculatorContract {
         })
     }
 
+    /// Returns the result schema describing SLAResult field semantics.
+    ///
+    /// Backend consumers call this to understand the meaning of symbolic
+    /// values in SLAResult fields (status, payment_type, rating). The schema
+    /// is versioned to allow safe evolution across contract upgrades.
     pub fn get_result_schema(env: Env) -> Result<SLAResultSchema, SLAError> {
         Self::check_version(&env)?;
         Ok(SLAResultSchema {
@@ -860,6 +963,26 @@ impl SLACalculatorContract {
     // SLA calculation (operator only)                                #28
     // -------------------------------------------------------------------
 
+    /// Calculate SLA deterministically and persist the result (operator only).
+    ///
+    /// Evaluates the SLA for the given outage against the severity config,
+    /// persists the result in history, updates statistics, and emits events.
+    /// Duplicate outage IDs are idempotent only when inputs resolve to the
+    /// same deterministic result.
+    ///
+    /// # Arguments
+    /// - `caller`: Must be the current operator address.
+    /// - `outage_id`: Unique identifier for this outage.
+    /// - `severity`: Severity tier to evaluate against.
+    /// - `mttr_minutes`: Actual mean time to resolution in minutes.
+    ///
+    /// # Events
+    /// - `sla_calc`: Emitted with full calculation result.
+    /// - `set_int`: Emitted with settlement intent details.
+    ///
+    /// # Errors
+    /// Returns `ContractPaused` if contract is paused, `Unauthorized` if
+    /// caller is not operator, or input validation errors.
     pub fn calculate_sla(
         env: Env,
         caller: Address, // #28 – operator must identify themselves
@@ -1012,12 +1135,17 @@ impl SLACalculatorContract {
         }
     }
 
+    /// Write the current storage version to contract storage.
     fn write_version(env: &Env) {
         env.storage()
             .instance()
             .set(&STORAGE_VERSION_KEY, &STORAGE_VERSION);
     }
 
+    /// Verify that the storage version matches the binary's expected version.
+    ///
+    /// Returns `VersionMismatch` if the stored version differs from
+    /// `STORAGE_VERSION`, indicating a migration is required.
     fn check_version(env: &Env) -> Result<(), SLAError> {
         let v: u32 = env
             .storage()
@@ -1030,6 +1158,7 @@ impl SLACalculatorContract {
         Ok(())
     }
 
+    /// Verify that the caller holds the admin role.
     fn require_admin(env: &Env, caller: &Address) -> Result<(), SLAError> {
         let admin: Address = env
             .storage()
@@ -1075,6 +1204,9 @@ impl SLACalculatorContract {
         Ok(())
     }
 
+    /// Verify that the contract is not currently paused.
+    ///
+    /// Returns `ContractPaused` if the contract is in a paused state.
     fn require_not_paused(env: &Env) -> Result<(), SLAError> {
         let paused: bool = env.storage().instance().get(&PAUSED_KEY).unwrap_or(false);
         if paused {
@@ -1147,6 +1279,7 @@ impl SLACalculatorContract {
         Ok(())
     }
 
+    /// Returns the list of canonical severity tiers in order.
     fn canonical_severities(env: &Env) -> Vec<Symbol> {
         let mut severities = Vec::new(env);
         severities.push_back(symbol_short!("critical"));
@@ -1156,6 +1289,7 @@ impl SLACalculatorContract {
         severities
     }
 
+    /// Returns the canonical index for a severity tier, or None if invalid.
     fn canonical_severity_index(severity: &Symbol) -> Option<u32> {
         if *severity == symbol_short!("critical") {
             Some(0)
@@ -1170,6 +1304,7 @@ impl SLACalculatorContract {
         }
     }
 
+    /// Check whether a severity symbol is one of the four canonical values.
     fn is_canonical_severity(severity: &Symbol) -> bool {
         Self::canonical_severity_index(severity).is_some()
     }
@@ -1263,6 +1398,7 @@ impl SLACalculatorContract {
         env.storage().instance().set(&STATS_KEY, &stats);
     }
 
+    /// Publish the `sla_calc` event with full calculation result.
     fn publish_sla_event(env: &Env, severity: Symbol, result: &SLAResult) {
         env.events().publish(
             (EVENT_SLA_CALC, EVENT_VERSION, severity),
@@ -1278,6 +1414,7 @@ impl SLACalculatorContract {
         );
     }
 
+    /// Publish the `set_int` settlement intent event for backend processing.
     fn publish_settlement_intent_event(env: &Env, severity: Symbol, result: &SLAResult) {
         env.events().publish(
             (EVENT_SETTLE_INTENT, EVENT_VERSION, severity),
