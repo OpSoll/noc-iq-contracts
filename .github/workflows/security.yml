@@ -25,8 +25,8 @@ jobs:
 
       # SC-099 — audit all dependencies against the RustSec advisory database
       - name: Run cargo audit
-        run: cargo audit --manifest-path sla_calculator/Cargo.toml
+        run: cargo audit
 
       # Surface the dependency tree so maintainers can spot unexpected additions
       - name: Show dependency tree
-        run: cargo tree --manifest-path sla_calculator/Cargo.toml --depth 2
+        run: cargo tree --depth 2

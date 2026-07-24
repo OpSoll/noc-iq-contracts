@@ -143,7 +143,7 @@ mod tests {
     #[test]
     fn test_correlation_id_long_outage_id() {
         let env = Env::default();
-        let long_outage = Symbol::new(&env, "INC-2024-03-15-ABCDEF123456");
+        let long_outage = Symbol::new(&env, "INC_2024_03_15_ABCDEF123456");
         let id = generate_correlation_id(&env, &long_outage, 99);
         assert_ne!(id, 0);
     }

@@ -111,7 +111,7 @@ pub fn requires_rollback(status: CrossContractCallStatus) -> bool {
 /// are compensated in reverse order.
 pub struct CrossContractSafety {
     /// Stack of compensation actions registered for each successful call.
-    compensation_stack: Vec<CompensationAction>,
+    pub(crate) compensation_stack: Vec<CompensationAction>,
 }
 
 impl CrossContractSafety {
@@ -177,6 +177,7 @@ pub const FN_CANCEL_SETTLEMENT: Symbol = symbol_short!("can_setl");
 #[cfg(test)]
 mod tests {
     use super::*;
+    use soroban_sdk::testutils::Address as _;
     use soroban_sdk::{symbol_short, Address, Env, Vec};
 
     #[test]

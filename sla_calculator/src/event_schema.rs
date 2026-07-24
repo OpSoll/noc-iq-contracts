@@ -143,7 +143,9 @@ pub fn current_event_version() -> Symbol {
 
 #[cfg(test)]
 mod tests {
+    extern crate alloc;
     use super::*;
+    use alloc::format;
     use soroban_sdk::Env;
 
     #[test]

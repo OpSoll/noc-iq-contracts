@@ -22,6 +22,9 @@
 
 #[cfg(test)]
 mod coordination_harness_tests {
+    extern crate alloc;
+    use alloc::format;
+    use soroban_sdk::testutils::Address as _;
     use soroban_sdk::{symbol_short, Address, Env, Symbol, Vec};
 
     use crate::cross_contract_safety::{
@@ -199,9 +202,8 @@ mod coordination_harness_tests {
             &env,
             &unknown,
             &symbol_short!("lock_fnds"),
-            &[],
-            cross_contract_safety::COMP_UNLOCK_FUNDS,
             Vec::new(&env),
+            cross_contract_safety::COMP_UNLOCK_FUNDS,
         );
 
         assert!(
@@ -225,20 +227,18 @@ mod coordination_harness_tests {
 
         // Simulate two successful calls by directly registering compensations
         // (the actual call path would register them via safety.call())
-        safety.compensation_stack.push_back((
-            symbol_short!("lock_fnds"),
-            cross_contract_safety::CompensationAction {
+        safety
+            .compensation_stack
+            .push_back(cross_contract_safety::CompensationAction {
                 tag: cross_contract_safety::COMP_UNLOCK_FUNDS,
-                args: Vec::new(&env),
-            },
-        ));
-        safety.compensation_stack.push_back((
-            symbol_short!("rel_pay"),
-            cross_contract_safety::CompensationAction {
+                fn_name: symbol_short!("lock_fnds"),
+            });
+        safety
+            .compensation_stack
+            .push_back(cross_contract_safety::CompensationAction {
                 tag: cross_contract_safety::COMP_REVERSE_SETTLE,
-                args: Vec::new(&env),
-            },
-        ));
+                fn_name: symbol_short!("rel_pay"),
+            });
 
         assert_eq!(safety.depth(), 2);
         assert!(safety.has_pending());
@@ -274,7 +274,7 @@ mod coordination_harness_tests {
         );
 
         // Step 2: Generate correlation ID for the workflow
-        let outage_id = Symbol::new(&env, "WF-2024-001");
+        let outage_id = Symbol::new(&env, "WF_2024_001");
         let ledger_seq = 50000u32;
         let corr_id = event_correlation::generate_correlation_id(&env, &outage_id, ledger_seq);
         assert_ne!(corr_id, 0, "Step 2: Correlation ID must be non-zero");
