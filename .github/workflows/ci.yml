@@ -23,7 +23,7 @@ jobs:
       - name: Cache Cargo dependencies
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: sla_calculator
+          workspaces: .
 
       - name: Check formatting
         run: cargo fmt --manifest-path sla_calculator/Cargo.toml -- --check
@@ -51,7 +51,7 @@ jobs:
       # SC-078 — surface contract size after release build
       - name: Check contract binary size
         run: |
-          WASM=sla_calculator/target/wasm32-unknown-unknown/release/sla_calculator.wasm
+          WASM=target/wasm32-unknown-unknown/release/sla_calculator.wasm
           SIZE=$(wc -c < "$WASM")
           echo "Contract size: ${SIZE} bytes"
           MAX=102400   # 100 KB soft limit
