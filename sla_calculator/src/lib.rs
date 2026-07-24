@@ -11,11 +11,11 @@ pub struct SLACalculatorContract;
 #[cfg(test)]
 mod tests;
 
-mod event_schema;
+pub mod coordination_harness;
 pub mod cross_contract_safety;
 pub mod event_correlation;
+mod event_schema;
 pub mod version_negotiation;
-pub mod coordination_harness;
 
 // -----------------------------------------------------------------------
 // Storage keys
@@ -102,9 +102,11 @@ pub enum SLAError {
     InvalidReward = 10,            // #70
     InvalidSeverity = 11,          // #70
     RetentionLimitOutOfRange = 12, // SC-013
-    DuplicateOutageInput = 13,       // SC-W5-046
-    InvalidPenaltyAmount = 14,       // SC-W5-046
-    InvalidRewardAmount = 15,         // SC-W5-046
+    DuplicateOutageInput = 13,     // SC-W5-046
+    InvalidPenaltyAmount = 14,     // SC-W5-046
+    InvalidRewardAmount = 15,      // SC-W5-046
+    InvalidOutageId = 16,          // SC-W5-077
+    MalformedSymbolInput = 17,     // SC-W5-077
 }
 
 // -----------------------------------------------------------------------
@@ -125,11 +127,11 @@ pub struct SLAResult {
     pub status: Symbol, // "met" | "viol"
     pub mttr_minutes: u32,
     pub threshold_minutes: u32,
-    pub amount: i128,         // negative = penalty, positive = reward
-    pub payment_type: Symbol, // "rew" | "pen"
-    pub rating: Symbol,       // "top" | "excel" | "good" | "poor"
+    pub amount: i128,             // negative = penalty, positive = reward
+    pub payment_type: Symbol,     // "rew" | "pen"
+    pub rating: Symbol,           // "top" | "excel" | "good" | "poor"
     pub config_version_hash: u64, // deterministic binding to config used for evaluation
-    pub recorded_at: u64,     // SC-063: ledger timestamp at calculation time
+    pub recorded_at: u64,         // SC-063: ledger timestamp at calculation time
 }
 
 #[contracttype]
@@ -583,16 +585,14 @@ impl SLACalculatorContract {
 
         let paused_at = env.ledger().timestamp();
         env.storage().instance().set(&PAUSED_KEY, &true);
-        env.storage()
-            .instance()
-            .set(
-                &PAUSE_INFO_KEY,
-                &PauseInfo {
-                    reason,
-                    paused_at,
-                    paused_by: caller.clone(),
-                },
-            );
+        env.storage().instance().set(
+            &PAUSE_INFO_KEY,
+            &PauseInfo {
+                reason,
+                paused_at,
+                paused_by: caller.clone(),
+            },
+        );
         env.events()
             .publish((EVENT_PAUSED, EVENT_VERSION, caller), (true,));
         Ok(())
@@ -740,7 +740,11 @@ impl SLACalculatorContract {
             (9, "InvalidPenalty", "Penalty out of range"),
             (10, "InvalidReward", "Reward out of range"),
             (11, "InvalidSeverity", "Severity not supported"),
-            (12, "RetentionLimitOutOfRange", "Retention limit out of range"),
+            (
+                12,
+                "RetentionLimitOutOfRange",
+                "Retention limit out of range",
+            ),
             (13, "DuplicateOutageInput", "Duplicate outage input"),
             (14, "InvalidPenaltyAmount", "Invalid penalty amount"),
             (15, "InvalidRewardAmount", "Invalid reward amount"),
@@ -759,7 +763,6 @@ impl SLACalculatorContract {
             codes,
         })
     }
-
 
     pub fn get_result_schema(env: Env) -> Result<SLAResultSchema, SLAError> {
         Self::check_version(&env)?;
@@ -788,10 +791,11 @@ impl SLACalculatorContract {
         features.push_back(symbol_short!("audit"));
         features.push_back(symbol_short!("pause"));
         features.push_back(symbol_short!("stats"));
-        features.push_back(symbol_short!("history"));            features.push_back(symbol_short!("failcode"));
-            features.push_back(symbol_short!("safe_call"));
-            features.push_back(symbol_short!("ver_nego"));
-            features.push_back(symbol_short!("corr_id"));
+        features.push_back(symbol_short!("history"));
+        features.push_back(symbol_short!("failcode"));
+        features.push_back(symbol_short!("safe_call"));
+        features.push_back(symbol_short!("ver_nego"));
+        features.push_back(symbol_short!("corr_id"));
 
         Ok(ContractMetadata {
             contract_name: symbol_short!("sla_calc"),
@@ -892,7 +896,8 @@ impl SLACalculatorContract {
         if let Some(prev) = existing {
             // Explicit duplicate policy: same outage_id is idempotent only when
             // execution inputs resolve to the same deterministic result.
-            if prev.mttr_minutes != mttr_minutes || prev.threshold_minutes != cfg.threshold_minutes {
+            if prev.mttr_minutes != mttr_minutes || prev.threshold_minutes != cfg.threshold_minutes
+            {
                 return Err(SLAError::DuplicateOutageInput);
             }
             return Ok(prev);
@@ -972,11 +977,7 @@ impl SLACalculatorContract {
             })
         } else {
             // Case 2: SLA met → reward
-            let performance_ratio = if threshold == 0 {
-                0
-            } else {
-                (mttr_minutes * 100) / threshold
-            };
+            let performance_ratio = (mttr_minutes * 100).checked_div(threshold).unwrap_or(0);
 
             let (multiplier, rating) = if performance_ratio < 50 {
                 (200u32, symbol_short!("top"))
@@ -1056,8 +1057,12 @@ impl SLACalculatorContract {
     /// Returns `InvalidSeverity` for config keys or `InvalidOutageId` for outage IDs
     /// when validation fails, allowing graceful degradation instead of panicking.
     fn validate_symbol_input(symbol: &Symbol, is_outage_id: bool) -> Result<(), SLAError> {
-        let s = symbol.to_string();
-        if s.len() == 0 || s.len() > 32 {
+        // In Soroban no_std, Symbol::to_string() is unavailable. A Symbol constructed
+        // from an empty string has payload 0 (TAG_SYMBOL with zero bits set).
+        // We can detect this by converting to Val and checking the payload.
+        // symbol_short!() always produces non-zero payloads for non-empty strings.
+        let payload = symbol.to_val().get_payload();
+        if payload == 0 {
             return Err(if is_outage_id {
                 SLAError::InvalidOutageId
             } else {
@@ -1504,7 +1509,6 @@ impl SLACalculatorContract {
 
     /// SC-021 – Migration state read helper
     // -------------------------------------------------------------------
-
     /// Returns the storage version and migration posture.
     ///
     /// Backend consumers should call this after any contract upgrade to confirm
@@ -1541,11 +1545,7 @@ impl SLACalculatorContract {
             .instance()
             .get(&STORAGE_VERSION_KEY)
             .ok_or(SLAError::NotInitialized)?;
-        let is_paused: bool = env
-            .storage()
-            .instance()
-            .get(&PAUSED_KEY)
-            .unwrap_or(false);
+        let is_paused: bool = env.storage().instance().get(&PAUSED_KEY).unwrap_or(false);
         Ok(VersionInfo {
             storage_version: stored_version,
             result_schema_version: RESULT_SCHEMA_VERSION,

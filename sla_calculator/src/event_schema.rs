@@ -16,26 +16,24 @@
 //! ## sla_calc (`sla_calc`)
 //! Emitted on every successful `calculate_sla` call.
 //! - topic[2]: severity Symbol
-//! - payload:  (outage_id: Symbol, status: Symbol, payment_type: Symbol,
-//!              rating: Symbol, mttr_minutes: u32, threshold_minutes: u32,
-//!              amount: i128)
+//! - payload: (outage_id: Symbol, status: Symbol, payment_type: Symbol,
+//!   rating: Symbol, mttr_minutes: u32, threshold_minutes: u32, amount: i128)
 //!
 //! ## set_int (`set_int`)
 //! Settlement intent emitted alongside sla_calc for backend reconciliation.
 //! - topic[2]: severity Symbol
-//! - payload:  (outage_id: Symbol, status: Symbol, payment_type: Symbol,
-//!              amount: i128, config_version_hash: u64, recorded_at: u64)
+//! - payload: (outage_id: Symbol, status: Symbol, payment_type: Symbol,
+//!   amount: i128, config_version_hash: u64, recorded_at: u64)
 //!
 //! ## cfg_upd (`cfg_upd`)
 //! Emitted on every successful `set_config` call.
 //! - topic[2]: severity Symbol
-//! - payload:  (threshold_minutes: u32, penalty_per_minute: i128,
-//!              reward_base: i128)
+//! - payload: (threshold_minutes: u32, penalty_per_minute: i128, reward_base: i128)
 //!
 //! ## paused (`paused`)
 //! Emitted when the contract is paused.
 //! - topic[2]: caller Address
-//! - payload:  (true,)
+//! - payload: (true,)
 //!
 //! ## unpause (`unpause`)
 //! Emitted when the contract is unpaused.
@@ -102,33 +100,52 @@
 use soroban_sdk::{symbol_short, Symbol};
 
 /// Canonical event version symbol used by all events.
+#[allow(dead_code)]
 pub const EVENT_VERSION: Symbol = symbol_short!("v1");
 
 /// Event name constants — these form topic[0] of every event.
+#[allow(dead_code)]
 pub const EVENT_SLA_CALC: Symbol = symbol_short!("sla_calc");
+#[allow(dead_code)]
 pub const EVENT_SETTLE_INTENT: Symbol = symbol_short!("set_int");
+#[allow(dead_code)]
 pub const EVENT_CONFIG_UPD: Symbol = symbol_short!("cfg_upd");
+#[allow(dead_code)]
 pub const EVENT_PAUSED: Symbol = symbol_short!("paused");
+#[allow(dead_code)]
 pub const EVENT_UNPAUSED: Symbol = symbol_short!("unpause");
+#[allow(dead_code)]
 pub const EVENT_OP_SET: Symbol = symbol_short!("op_set");
+#[allow(dead_code)]
 pub const EVENT_PRUNED: Symbol = symbol_short!("pruned");
+#[allow(dead_code)]
 pub const EVENT_PRUNED_AGE: Symbol = symbol_short!("pruned_a");
+#[allow(dead_code)]
 pub const EVENT_ADMIN_PROP: Symbol = symbol_short!("adm_prop");
+#[allow(dead_code)]
 pub const EVENT_ADMIN_ACC: Symbol = symbol_short!("adm_acc");
+#[allow(dead_code)]
 pub const EVENT_ADMIN_CAN: Symbol = symbol_short!("adm_can");
+#[allow(dead_code)]
 pub const EVENT_ADMIN_REN: Symbol = symbol_short!("adm_ren");
+#[allow(dead_code)]
 pub const EVENT_OP_PROP: Symbol = symbol_short!("op_prop");
+#[allow(dead_code)]
 pub const EVENT_OP_ACC: Symbol = symbol_short!("op_acc");
+#[allow(dead_code)]
 pub const EVENT_OP_CAN: Symbol = symbol_short!("op_can");
 
 /// Returns the canonical event version string for consumer documentation.
+#[allow(dead_code)]
 pub fn current_event_version() -> Symbol {
     EVENT_VERSION
 }
 
 #[cfg(test)]
 mod tests {
+    extern crate alloc;
     use super::*;
+    use alloc::format;
     use soroban_sdk::Env;
 
     #[test]
@@ -158,7 +175,11 @@ mod tests {
 
         for i in 0..names.len() {
             for j in (i + 1)..names.len() {
-                assert_ne!(names[i], names[j], "event name collision: {:?} == {:?}", names[i], names[j]);
+                assert_ne!(
+                    names[i], names[j],
+                    "event name collision: {:?} == {:?}",
+                    names[i], names[j]
+                );
             }
         }
     }

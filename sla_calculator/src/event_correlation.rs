@@ -39,14 +39,22 @@ pub const CORRELATION_TOPIC: Symbol = symbol_short!("corr_id");
 ///
 /// Uses a simple hash: rotate the outage_id hash bits, then XOR with the
 /// ledger sequence to incorporate temporal uniqueness.
-pub fn generate_correlation_id(env: &Env, outage_id: &Symbol, ledger_sequence: u32) -> CorrelationId {
-    let id_bytes = outage_id.to_string().as_bytes().to_vec();
-    let mut hash: u64 = 0xcbf29ce484222325; // FNV-1a offset basis
-    for b in id_bytes {
-        hash ^= b as u64;
-        hash = hash.wrapping_mul(0x100000001b3); // FNV-1a prime
-    }
-    // Mix in the ledger sequence for temporal uniqueness
+pub fn generate_correlation_id(
+    _env: &Env,
+    outage_id: &Symbol,
+    ledger_sequence: u32,
+) -> CorrelationId {
+    // Use the Symbol's raw Val payload bits as the seed for the hash.
+    // This is deterministic for a given symbol string and avoids
+    // Symbol::to_string() which is not available in no_std Soroban.
+    use soroban_sdk::TryIntoVal;
+    let payload: u64 = outage_id
+        .try_into_val(_env)
+        .map(|v: soroban_sdk::Val| v.get_payload())
+        .unwrap_or(0xcbf29ce484222325);
+    let mut hash: u64 = payload ^ 0xcbf29ce484222325; // FNV-1a offset basis
+    hash = hash.wrapping_mul(0x100000001b3); // FNV-1a prime
+                                             // Mix in the ledger sequence for temporal uniqueness
     hash ^= (ledger_sequence as u64) << 32 | ledger_sequence as u64;
     hash
 }
@@ -135,7 +143,7 @@ mod tests {
     #[test]
     fn test_correlation_id_long_outage_id() {
         let env = Env::default();
-        let long_outage = Symbol::new(&env, "INC-2024-03-15-ABCDEF123456");
+        let long_outage = Symbol::new(&env, "INC_2024_03_15_ABCDEF123456");
         let id = generate_correlation_id(&env, &long_outage, 99);
         assert_ne!(id, 0);
     }
