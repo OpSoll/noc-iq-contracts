@@ -22,6 +22,7 @@ pub mod cross_contract_safety;
 pub mod dispute;
 pub mod event_correlation;
 mod event_schema;
+pub mod reward_cap;
 pub mod multi_operator;
 pub mod upgrade_path;
 pub mod version_negotiation;
