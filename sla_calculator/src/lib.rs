@@ -12,6 +12,7 @@ pub struct SLACalculatorContract;
 mod tests;
 
 #[cfg(test)]
+mod fuzz_tests;
 mod proptests;
 
 #[cfg(test)]
