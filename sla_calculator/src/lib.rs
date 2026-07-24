@@ -16,6 +16,7 @@ pub mod cross_contract_safety;
 pub mod event_correlation;
 mod event_schema;
 pub mod oracle;
+pub mod submission_rate;
 pub mod version_negotiation;
 
 // -----------------------------------------------------------------------
