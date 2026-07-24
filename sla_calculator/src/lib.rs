@@ -15,6 +15,8 @@ pub mod coordination_harness;
 pub mod cross_contract_safety;
 pub mod event_correlation;
 mod event_schema;
+pub mod penalty_escalation;
+pub mod trend;
 pub mod version_negotiation;
 
 // -----------------------------------------------------------------------
