@@ -15,7 +15,9 @@ pub mod coordination_harness;
 pub mod cross_contract_safety;
 pub mod event_correlation;
 mod event_schema;
+pub mod reward_cap;
 pub mod version_negotiation;
+pub mod whitelist;
 
 // -----------------------------------------------------------------------
 // Storage keys
