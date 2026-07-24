@@ -11,13 +11,12 @@ pub struct SLACalculatorContract;
 #[cfg(test)]
 mod tests;
 
-#[cfg(test)]
-mod gas_profile;
-
 pub mod coordination_harness;
 pub mod cross_contract_safety;
 pub mod event_correlation;
 mod event_schema;
+pub mod event_index;
+pub mod oracle;
 pub mod version_negotiation;
 
 // -----------------------------------------------------------------------
