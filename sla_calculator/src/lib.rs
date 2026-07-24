@@ -14,6 +14,9 @@ mod tests;
 #[cfg(test)]
 mod proptests;
 
+#[cfg(test)]
+mod benchmarks;
+
 pub mod coordination_harness;
 pub mod cross_contract_safety;
 pub mod dispute;
