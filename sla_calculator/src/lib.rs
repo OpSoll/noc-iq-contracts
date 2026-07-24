@@ -23,6 +23,7 @@ pub mod dispute;
 pub mod event_correlation;
 mod event_schema;
 pub mod multi_operator;
+pub mod upgrade_path;
 pub mod version_negotiation;
 
 // -----------------------------------------------------------------------
