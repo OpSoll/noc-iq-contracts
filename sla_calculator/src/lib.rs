@@ -26,6 +26,7 @@ pub mod reward_cap;
 pub mod multi_operator;
 pub mod upgrade_path;
 pub mod version_negotiation;
+pub mod whitelist;
 
 // -----------------------------------------------------------------------
 // Storage keys
