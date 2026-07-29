@@ -4,10 +4,11 @@ extern crate alloc;
 use alloc::format;
 
 use super::*;
+use crate::batch::BatchRequest;
 use soroban_sdk::testutils::Address as _;
 use soroban_sdk::testutils::Events as _;
 use soroban_sdk::testutils::Ledger as _;
-use soroban_sdk::{Env, Symbol, TryIntoVal};
+use soroban_sdk::{Env, Symbol, TryIntoVal, Vec};
 
 // ============================================================
 // Test helpers
