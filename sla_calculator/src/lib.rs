@@ -660,19 +660,22 @@ impl SLACalculatorContract {
         Self::check_version(&env)?;
         Self::require_admin(&env, &caller)?; // #28 – admin role enforced
 
-        // #70 – Validate configuration parameters
-        Self::validate_config(
-            &severity,
-            threshold_minutes,
-            penalty_per_minute,
-            reward_base,
-        )?;
-
+        // Load existing configs first to validate against
         let mut configs: Map<Symbol, SLAConfig> = env
             .storage()
             .instance()
             .get(&CONFIG_KEY)
             .ok_or(SLAError::NotInitialized)?;
+
+        // #70 – Validate configuration parameters, including cross-severity relationships
+        Self::validate_config(
+            &env,
+            &severity,
+            threshold_minutes,
+            penalty_per_minute,
+            reward_base,
+            &configs,
+        )?;
 
         configs.set(
             severity.clone(),
