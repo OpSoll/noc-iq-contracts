@@ -121,6 +121,27 @@ pub struct SLAConfig {
     pub reward_base: i128,
 }
 
+/// Input type for outage data used in SLA calculations
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OutageInput {
+    pub outage_id: Symbol,
+    pub severity: Symbol,
+    pub mttr_minutes: u32,
+}
+
+/// Result type specifically for simulation outputs, containing only computational results
+/// without any on-chain metadata
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SlaResult {
+    pub is_breach: bool,
+    pub penalty_amount: i128,
+    pub uptime_bps: u32,
+    pub applied_tier: Option<Symbol>,
+}
+
+/// Original SLAResult type for persisted on-chain calculations
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SLAResult {
