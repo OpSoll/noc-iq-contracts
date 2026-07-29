@@ -5080,6 +5080,102 @@ fn test_set_config_rejects_threshold_zero_for_low() {
     client.set_config(&actors.admin, &symbol_short!("low"), &0, &10, &600);
 }
 
+// --- Cross-severity monotonicity rejections ---
+
+#[test]
+#[should_panic]
+fn test_set_config_rejects_critical_threshold_greater_than_high() {
+    // Critical threshold (31) > high threshold (30 default) - should be rejected
+    let (_env, client, actors) = setup();
+    client.set_config(&actors.admin, &symbol_short!("critical"), &31, &100, &750);
+}
+
+#[test]
+#[should_panic]
+fn test_set_config_rejects_high_threshold_greater_than_medium() {
+    // High threshold (61) > medium threshold (60 default) - should be rejected
+    let (_env, client, actors) = setup();
+    client.set_config(&actors.admin, &symbol_short!("high"), &61, &50, &750);
+}
+
+#[test]
+#[should_panic]
+fn test_set_config_rejects_medium_threshold_greater_than_low() {
+    // Medium threshold (121) > low threshold (120 default) - should be rejected
+    let (_env, client, actors) = setup();
+    client.set_config(&actors.admin, &symbol_short!("medium"), &121, &25, &750);
+}
+
+#[test]
+#[should_panic]
+fn test_set_config_rejects_low_penalty_greater_than_medium() {
+    // Low penalty (26) > medium penalty (25 default) - should be rejected
+    let (_env, client, actors) = setup();
+    client.set_config(&actors.admin, &symbol_short!("low"), &120, &26, &600);
+}
+
+#[test]
+#[should_panic]
+fn test_set_config_rejects_medium_penalty_greater_than_high() {
+    // Medium penalty (51) > high penalty (50 default) - should be rejected
+    let (_env, client, actors) = setup();
+    client.set_config(&actors.admin, &symbol_short!("medium"), &60, &51, &750);
+}
+
+#[test]
+#[should_panic]
+fn test_set_config_rejects_high_penalty_greater_than_critical() {
+    // High penalty (101) > critical penalty (100 default) - should be rejected
+    let (_env, client, actors) = setup();
+    client.set_config(&actors.admin, &symbol_short!("high"), &30, &101, &750);
+}
+
+#[test]
+#[should_panic]
+fn test_set_config_rejects_high_threshold_less_than_critical() {
+    // High threshold (14) < critical threshold (15 default) - should be rejected
+    let (_env, client, actors) = setup();
+    client.set_config(&actors.admin, &symbol_short!("high"), &14, &50, &750);
+}
+
+#[test]
+#[should_panic]
+fn test_set_config_rejects_critical_penalty_less_than_high() {
+    // Critical penalty (49) < high penalty (50 default) - should be rejected
+    let (_env, client, actors) = setup();
+    client.set_config(&actors.admin, &symbol_short!("critical"), &15, &49, &750);
+}
+
+#[test]
+fn test_set_config_accepts_valid_cross_severity_updates() {
+    // Valid updates that maintain monotonicity should be accepted
+    let (_env, client, actors) = setup();
+    
+    // Update critical first (valid values)
+    client.set_config(&actors.admin, &symbol_short!("critical"), &20, &100, &750);
+    // Then update high (must be > critical threshold 20 and < critical penalty 100)
+    client.set_config(&actors.admin, &symbol_short!("high"), &40, &50, &750);
+    // Then update medium (must be > high threshold 40 and < high penalty 50)
+    client.set_config(&actors.admin, &symbol_short!("medium"), &80, &25, &750);
+    // Then update low (must be > medium threshold 80 and < medium penalty 25)
+    client.set_config(&actors.admin, &symbol_short!("low"), &160, &10, &600);
+    
+    // Verify all values were set correctly
+    let critical = client.get_config(&symbol_short!("critical"));
+    let high = client.get_config(&symbol_short!("high"));
+    let medium = client.get_config(&symbol_short!("medium"));
+    let low = client.get_config(&symbol_short!("low"));
+    
+    assert_eq!(critical.threshold_minutes, 20);
+    assert_eq!(critical.penalty_per_minute, 100);
+    assert_eq!(high.threshold_minutes, 40);
+    assert_eq!(high.penalty_per_minute, 50);
+    assert_eq!(medium.threshold_minutes, 80);
+    assert_eq!(medium.penalty_per_minute, 25);
+    assert_eq!(low.threshold_minutes, 160);
+    assert_eq!(low.penalty_per_minute, 10);
+}
+
 // ============================================================
 // SC-W5-049 (#250) – Failure-class mapping: retryable vs terminal errors
 //
