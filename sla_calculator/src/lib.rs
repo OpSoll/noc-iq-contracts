@@ -847,6 +847,29 @@ impl SLACalculatorContract {
 
     /// Recalculates SLA deterministically without mutating any state or emitting events.
     /// Can be called by anyone for verification and audit purposes.
+    /// Simulates SLA calculation for hypothetical outage data without modifying any persistent
+    /// storage or emitting any events. This is a pure read-only function that can be called
+    /// safely and repeatedly without side effects. It returns only the computational results
+    /// of the SLA calculation.
+    /// 
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `outage` - The outage input data containing outage ID, severity, and MTTR minutes
+    /// 
+    /// # Returns
+    /// * `SlaResult` - Contains breach status, penalty amount, uptime basis points, and the
+    ///   applied severity tier
+    pub fn simulate_sla(env: Env, outage: OutageInput) -> Result<SlaResult, SLAError> {
+        Self::check_version(&env)?;
+        // Validate inputs just like in production calculations
+        Self::validate_symbol_input(&outage.outage_id, true)?;
+        Self::validate_symbol_input(&outage.severity, false)?;
+        // We bypass pause and operator checks to allow public simulation
+        let cfg = Self::load_config(&env, &outage.severity)?;
+        // Delegate to pure core calculation logic - no storage writes, no events emitted
+        Ok(Self::compute_sla(&env, &cfg, &outage))
+    }
+
     pub fn calculate_sla_view(
         env: Env,
         outage_id: Symbol,
