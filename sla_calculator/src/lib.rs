@@ -1132,23 +1132,34 @@ impl SLACalculatorContract {
         Ok(())
     }
 
-    /// #27 – Blocks execution when the contract is paused.
-    /// Validates that a Symbol is not empty and is within reasonable length limits.
-    /// Returns `InvalidSeverity` for config keys or `InvalidOutageId` for outage IDs
-    /// when validation fails, allowing graceful degradation instead of panicking.
+    /// Validates that a Symbol is not empty, within 32 character length limit,
+    /// and contains only valid characters (a-zA-Z0-9_). Returns `InvalidOutageId`
+    /// for outage IDs or `MalformedSymbolInput` for other symbols when validation
+    /// fails, allowing graceful degradation instead of panicking.
     fn validate_symbol_input(symbol: &Symbol, is_outage_id: bool) -> Result<(), SLAError> {
-        // In Soroban no_std, Symbol::to_string() is unavailable. A Symbol constructed
-        // from an empty string has payload 0 (TAG_SYMBOL with zero bits set).
-        // We can detect this by converting to Val and checking the payload.
-        // symbol_short!() always produces non-zero payloads for non-empty strings.
-        let payload = symbol.to_val().get_payload();
-        if payload == 0 {
+        // Convert symbol to string to inspect its content and length
+        let s = symbol.to_string();
+        
+        // Check length constraints: 0 < length <= 32
+        if s.is_empty() || s.len() > 32 {
             return Err(if is_outage_id {
                 SLAError::InvalidOutageId
             } else {
                 SLAError::MalformedSymbolInput
             });
         }
+        
+        // Validate all characters are alphanumeric or underscore
+        for c in s.chars() {
+            if !c.is_ascii_alphanumeric() && c != '_' {
+                return Err(if is_outage_id {
+                    SLAError::InvalidOutageId
+                } else {
+                    SLAError::MalformedSymbolInput
+                });
+            }
+        }
+        
         Ok(())
     }
 
