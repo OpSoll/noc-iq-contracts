@@ -1,0 +1,4 @@
+# WASM binary size budget for CI gate
+# Update this value when intentional size increases are accepted
+# See CONTRIBUTING.md for the process to change this budget
+MAX_WASM_BYTES=65536
