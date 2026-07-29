@@ -968,6 +968,38 @@ impl SLACalculatorContract {
     /// `config_version_hash` binds the result to the exact config snapshot used
     /// during evaluation. `recorded_at` is the ledger timestamp at call time
     /// (0 in view/audit mode).
+    /// Pure core calculation logic used by both calculate_sla and simulate_sla
+    /// Extracts the essential SLA computation without any side effects
+    fn compute_sla(env: &Env, config: &SLAConfig, outage: &OutageInput) -> SlaResult {
+        let threshold = config.threshold_minutes;
+        let mttr_minutes = outage.mttr_minutes;
+        
+        let is_breach = mttr_minutes > threshold;
+        let penalty_amount = if is_breach {
+            let overtime = (mttr_minutes - threshold) as i128;
+            overtime.saturating_mul(config.penalty_per_minute)
+        } else {
+            0
+        };
+        
+        // Calculate uptime basis points (10000 bps = 100%) - (mttr / threshold) as percentage in bps
+        let uptime_bps = if threshold == 0 {
+            0
+        } else {
+            (mttr_minutes * 10000) / threshold
+        };
+        
+        // Map severity to the applied tier
+        let applied_tier = Some(outage.severity.clone());
+        
+        SlaResult {
+            is_breach,
+            penalty_amount,
+            uptime_bps,
+            applied_tier,
+        }
+    }
+
     fn compute_result(
         outage_id: Symbol,
         mttr_minutes: u32,
