@@ -1,7 +1,7 @@
 #[cfg(test)]
 mod outage_id_tests {
-    use soroban_sdk::{symbol_short, testutils::Address as _, Address, Env};
-    use crate::{SLACalculatorContract, SLACalculatorContractClient};
+    use soroban_sdk::{symbol_short, testutils::Address as _, Address, Env, Symbol};
+    use crate::{SLACalculatorContract, SLACalculatorContractClient, SLAError};
 
     fn setup(env: &Env) -> (Address, Address, SLACalculatorContractClient) {
         env.mock_all_auths();
