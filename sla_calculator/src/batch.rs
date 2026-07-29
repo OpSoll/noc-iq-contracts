@@ -67,6 +67,9 @@ pub fn batch_calculate(
     caller: &soroban_sdk::Address,
     requests: soroban_sdk::Vec<BatchRequest>,
 ) -> Result<(BatchSummary, soroban_sdk::Vec<BatchResult>), SLAError> {
+    // Validate batch size and contents before processing
+    validate_batch(env, &requests)?;
+
     // Verify operator role
     let operator: soroban_sdk::Address = env
         .storage()
