@@ -121,6 +121,27 @@ pub struct SLAConfig {
     pub reward_base: i128,
 }
 
+/// Input type for outage data used in SLA calculations
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OutageInput {
+    pub outage_id: Symbol,
+    pub severity: Symbol,
+    pub mttr_minutes: u32,
+}
+
+/// Result type specifically for simulation outputs, containing only computational results
+/// without any on-chain metadata
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SlaResult {
+    pub is_breach: bool,
+    pub penalty_amount: i128,
+    pub uptime_bps: u32,
+    pub applied_tier: Option<Symbol>,
+}
+
+/// Original SLAResult type for persisted on-chain calculations
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SLAResult {
@@ -826,6 +847,29 @@ impl SLACalculatorContract {
 
     /// Recalculates SLA deterministically without mutating any state or emitting events.
     /// Can be called by anyone for verification and audit purposes.
+    /// Simulates SLA calculation for hypothetical outage data without modifying any persistent
+    /// storage or emitting any events. This is a pure read-only function that can be called
+    /// safely and repeatedly without side effects. It returns only the computational results
+    /// of the SLA calculation.
+    /// 
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `outage` - The outage input data containing outage ID, severity, and MTTR minutes
+    /// 
+    /// # Returns
+    /// * `SlaResult` - Contains breach status, penalty amount, uptime basis points, and the
+    ///   applied severity tier
+    pub fn simulate_sla(env: Env, outage: OutageInput) -> Result<SlaResult, SLAError> {
+        Self::check_version(&env)?;
+        // Validate inputs just like in production calculations
+        Self::validate_symbol_input(&outage.outage_id, true)?;
+        Self::validate_symbol_input(&outage.severity, false)?;
+        // We bypass pause and operator checks to allow public simulation
+        let cfg = Self::load_config(&env, &outage.severity)?;
+        // Delegate to pure core calculation logic - no storage writes, no events emitted
+        Ok(Self::compute_sla(&env, &cfg, &outage))
+    }
+
     pub fn calculate_sla_view(
         env: Env,
         outage_id: Symbol,
@@ -947,6 +991,38 @@ impl SLACalculatorContract {
     /// `config_version_hash` binds the result to the exact config snapshot used
     /// during evaluation. `recorded_at` is the ledger timestamp at call time
     /// (0 in view/audit mode).
+    /// Pure core calculation logic used by both calculate_sla and simulate_sla
+    /// Extracts the essential SLA computation without any side effects
+    fn compute_sla(env: &Env, config: &SLAConfig, outage: &OutageInput) -> SlaResult {
+        let threshold = config.threshold_minutes;
+        let mttr_minutes = outage.mttr_minutes;
+        
+        let is_breach = mttr_minutes > threshold;
+        let penalty_amount = if is_breach {
+            let overtime = (mttr_minutes - threshold) as i128;
+            overtime.saturating_mul(config.penalty_per_minute)
+        } else {
+            0
+        };
+        
+        // Calculate uptime basis points (10000 bps = 100%) - (mttr / threshold) as percentage in bps
+        let uptime_bps = if threshold == 0 {
+            0
+        } else {
+            (mttr_minutes * 10000) / threshold
+        };
+        
+        // Map severity to the applied tier
+        let applied_tier = Some(outage.severity.clone());
+        
+        SlaResult {
+            is_breach,
+            penalty_amount,
+            uptime_bps,
+            applied_tier,
+        }
+    }
+
     fn compute_result(
         outage_id: Symbol,
         mttr_minutes: u32,

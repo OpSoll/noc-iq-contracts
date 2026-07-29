@@ -75,7 +75,8 @@ noc-iq-contracts/
 │   ├── config-validation.md
 │   ├── contract-module-map.md
 │   ├── contributor-verification-guide.md
-│   └── sc-w5-storage-and-cost-baselines.md
+│   ├── sc-w5-storage-and-cost-baselines.md
+│   └── storage-layout-and-ttl.md # Detailed storage keys, types, and TTL management
 ├── offchain/                # TypeScript off-chain integration helpers
 ├── pers-store/              # persistent storage helpers
 ├── scripts/                 # deployment, migration, and tooling scripts

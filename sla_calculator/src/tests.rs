@@ -95,6 +95,35 @@ fn test_defaults_exist_after_initialize() {
 }
 
 #[test]
+fn test_simulate_does_not_persist() {
+    let (env, client, _actors) = setup();
+    
+    // Verify initial history is empty
+    let initial_history = client.get_history();
+    assert_eq!(initial_history.len(), 0, "History should start empty");
+    
+    // Create test outage input
+    let outage = OutageInput {
+        outage_id: symbol(&env, "test_outage_1"),
+        severity: symbol_short!("critical"),
+        mttr_minutes: 20, // Exceeds critical threshold of 15 minutes
+    };
+    
+    // Call simulate_sla
+    let result = client.simulate_sla(&outage);
+    
+    // Verify simulation worked correctly
+    assert!(result.is_breach, "Should detect breach for MTTR exceeding threshold");
+    assert_eq!(result.penalty_amount, 500, "Penalty should be 5min * 100/min = 500");
+    assert_eq!(result.uptime_bps, 13333, "Uptime bps calculation: 20/15*10000 = 13333");
+    assert_eq!(result.applied_tier, Some(symbol_short!("critical")), "Should apply correct severity tier");
+    
+    // Verify history is still empty - nothing was persisted
+    let final_history = client.get_history();
+    assert_eq!(final_history.len(), 0, "History should still be empty after simulation");
+}
+
+#[test]
 fn test_config_snapshot_is_deterministic_and_complete() {
     let (_env, client, _actors) = setup();
 
