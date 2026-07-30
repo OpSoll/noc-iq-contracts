@@ -2,12 +2,48 @@
 
 extern crate std;
 
-use soroban_sdk::{symbol_short, Address, Env};
+use proptest::prelude::*;
+use soroban_sdk::{symbol_short, Address, Env, Symbol, Vec};
 use std::string::String;
 
-use crate::{SLACalculatorContract, SLAError, SLAConfig};
+use crate::{SLACalculatorContract, SLAError, SLAConfig, batch::{BatchRequest, BatchSummary, BatchResult}};
 
 mod utils;
+
+/// Proptest strategy to generate valid Symbol values for outage IDs
+fn arb_outage_id() -> impl Strategy<Value = Symbol> {
+    // Generate valid symbol strings (alphanumeric, <=32 chars)
+    "[a-zA-Z0-9_]{1,32}".prop_map(|s| Symbol::from_string(s))
+}
+
+/// Proptest strategy to generate valid severity symbols
+fn arb_severity() -> impl Strategy<Value = Symbol> {
+    prop_oneof![
+        Just(symbol_short!("critical")),
+        Just(symbol_short!("high")),
+        Just(symbol_short!("medium")),
+        Just(symbol_short!("low")),
+    ]
+}
+
+/// Proptest strategy to generate a single valid BatchRequest
+fn arb_batch_request() -> impl Strategy<Value = BatchRequest> {
+    (arb_outage_id(), arb_severity(), 1u32..10000) // MTTR from 1 to 9999 minutes
+        .prop_map(|(outage_id, severity, mttr_minutes)| BatchRequest {
+            outage_id,
+            severity,
+            mttr_minutes,
+        })
+}
+
+/// Proptest strategy to generate a vector of BatchRequests with unique outage IDs
+fn arb_batch_requests() -> impl Strategy<Value = std::vec::Vec<BatchRequest>> {
+    proptest::collection::vec(arb_batch_request(), 1..50) // Batch size 1 to 50 (max batch limit)
+        .prop_filter("All outage IDs must be unique", |requests| {
+            let mut seen = std::collections::HashSet::new();
+            requests.iter().all(|req| seen.insert(req.outage_id))
+        })
+}
 
 /// Property: SLA met result always has positive amount and "rew" payment type
 #[test]

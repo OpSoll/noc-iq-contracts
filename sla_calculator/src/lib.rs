@@ -973,6 +973,17 @@ impl SLACalculatorContract {
         Ok((summary, results))
     }
 
+    /// Calculate SLA for multiple outages in a single transaction (operator only).
+    /// Processes each item in the batch sequentially. Failed items do not
+    /// halt the batch; they are recorded as failures in the results.
+    pub fn batch_calculate(
+        env: Env,
+        caller: Address,
+        requests: soroban_sdk::Vec<crate::batch::BatchRequest>,
+    ) -> Result<(crate::batch::BatchSummary, soroban_sdk::Vec<crate::batch::BatchResult>), SLAError> {
+        crate::batch::batch_calculate(&env, &caller, requests)
+    }
+
     // -------------------------------------------------------------------
     // SLA calculation (operator only)                                #28
     // -------------------------------------------------------------------
