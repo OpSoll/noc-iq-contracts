@@ -412,6 +412,118 @@ fn test_old_operator_locked_out_after_rotation() {
 }
 
 // ============================================================
+// #472 – Operator revocation
+// ============================================================
+
+#[test]
+fn test_admin_can_revoke_operator() {
+    let (env, client, actors) = setup();
+
+    // Verify operator exists before revocation
+    assert_eq!(client.get_operator(), actors.operator);
+
+    // Revoke
+    client.revoke_operator(&actors.admin);
+
+    // Operator should be removed; no one can calculate SLA
+    let blocked = client.try_calculate_sla(
+        &actors.operator,
+        &symbol_short!("REV001"),
+        &symbol_short!("critical"),
+        &10,
+    );
+    assert!(
+        blocked.is_err(),
+        "calculate_sla must fail after operator revocation"
+    );
+}
+
+#[test]
+fn test_revoked_operator_cannot_calculate() {
+    let (env, client, actors) = setup();
+
+    client.revoke_operator(&actors.admin);
+
+    // The old operator cannot calculate
+    let result = client.try_calculate_sla(
+        &actors.operator,
+        &symbol_short!("REV002"),
+        &symbol_short!("critical"),
+        &10,
+    );
+    assert!(result.is_err(), "Revoked operator must be rejected");
+}
+
+#[test]
+fn test_revoked_operator_can_be_replaced() {
+    let (env, client, actors) = setup();
+    let new_operator = soroban_sdk::Address::generate(&env);
+
+    // Revoke current operator
+    client.revoke_operator(&actors.admin);
+
+    // Set a new operator
+    client.set_operator(&actors.admin, &new_operator);
+
+    // New operator can calculate
+    let result = client.calculate_sla(
+        &new_operator,
+        &symbol_short!("REV003"),
+        &symbol_short!("critical"),
+        &10,
+    );
+    assert_eq!(result.status, symbol_short!("met"));
+}
+
+#[test]
+fn test_revoke_operator_clears_pending_proposal() {
+    let (env, client, actors) = setup();
+    let new_op = soroban_sdk::Address::generate(&env);
+
+    // Create a pending operator proposal
+    client.propose_operator(&actors.admin, &new_op);
+    assert_eq!(
+        client.get_pending_operator(),
+        Some(new_op.clone()),
+        "Pending operator must exist before revocation"
+    );
+
+    // Revoke clears both operator and pending proposal
+    client.revoke_operator(&actors.admin);
+
+    // Pending proposal is cleared
+    assert_eq!(
+        client.get_pending_operator(),
+        None,
+        "Pending operator must be cleared after revocation"
+    );
+
+    // A new operator proposal can be created for a different operator
+    let another_op = soroban_sdk::Address::generate(&env);
+    client.propose_operator(&actors.admin, &another_op);
+    assert_eq!(
+        client.get_pending_operator(),
+        Some(another_op),
+        "New operator proposal must work after revocation"
+    );
+}
+
+#[test]
+#[should_panic]
+fn test_operator_cannot_revoke_self() {
+    let (env, client, actors) = setup();
+    // operator must not have admin authority to revoke
+    client.revoke_operator(&actors.operator);
+}
+
+#[test]
+#[should_panic]
+fn test_stranger_cannot_revoke_operator() {
+    let (env, client, actors) = setup();
+    client.revoke_operator(&actors.stranger);
+}
+
+// ============================================================
 // #27 – Pause / Emergency Stop
 // ============================================================
 
