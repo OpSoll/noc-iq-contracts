@@ -2,12 +2,48 @@
 
 extern crate std;
 
-use soroban_sdk::{symbol_short, Address, Env};
+use proptest::prelude::*;
+use soroban_sdk::{symbol_short, Address, Env, Symbol, Vec};
 use std::string::String;
 
-use crate::{SLACalculatorContract, SLAError, SLAConfig};
+use crate::{SLACalculatorContract, SLAError, SLAConfig, batch::{BatchRequest, BatchSummary, BatchResult}};
 
 mod utils;
+
+/// Proptest strategy to generate valid Symbol values for outage IDs
+fn arb_outage_id() -> impl Strategy<Value = Symbol> {
+    // Generate valid symbol strings (alphanumeric, <=32 chars)
+    "[a-zA-Z0-9_]{1,32}".prop_map(|s| Symbol::from_string(s))
+}
+
+/// Proptest strategy to generate valid severity symbols
+fn arb_severity() -> impl Strategy<Value = Symbol> {
+    prop_oneof![
+        Just(symbol_short!("critical")),
+        Just(symbol_short!("high")),
+        Just(symbol_short!("medium")),
+        Just(symbol_short!("low")),
+    ]
+}
+
+/// Proptest strategy to generate a single valid BatchRequest
+fn arb_batch_request() -> impl Strategy<Value = BatchRequest> {
+    (arb_outage_id(), arb_severity(), 1u32..10000) // MTTR from 1 to 9999 minutes
+        .prop_map(|(outage_id, severity, mttr_minutes)| BatchRequest {
+            outage_id,
+            severity,
+            mttr_minutes,
+        })
+}
+
+/// Proptest strategy to generate a vector of BatchRequests with unique outage IDs
+fn arb_batch_requests() -> impl Strategy<Value = std::vec::Vec<BatchRequest>> {
+    proptest::collection::vec(arb_batch_request(), 1..50) // Batch size 1 to 50 (max batch limit)
+        .prop_filter("All outage IDs must be unique", |requests| {
+            let mut seen = std::collections::HashSet::new();
+            requests.iter().all(|req| seen.insert(req.outage_id))
+        })
+}
 
 /// Property: SLA met result always has positive amount and "rew" payment type
 #[test]
@@ -278,4 +314,70 @@ fn prop_snapshot_always_has_four_entries() {
     assert_eq!(severities[1], symbol_short!("high"));
     assert_eq!(severities[2], symbol_short!("medium"));
     assert_eq!(severities[3], symbol_short!("low"));
+}
+
+/// Property: For all valid batch requests, succeeded + failed == total
+#[test]
+fn prop_batch_succeeded_plus_failed_equals_total() {
+    proptest!(|(requests in arb_batch_requests())| {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, SLACalculatorContract);
+        let client = SLACalculatorContract::new_client(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let operator = Address::generate(&env);
+        client.initialize(&admin, &operator);
+
+        // Convert std::vec::Vec to soroban_sdk::Vec
+        let mut soroban_requests = Vec::new(&env);
+        for req in requests {
+            soroban_requests.push_back(req);
+        }
+
+        // Call view version (no state mutation)
+        let (summary, _results) = client.batch_calculate_view(&soroban_requests).unwrap();
+        
+        // Verify the invariant
+        assert_eq!(summary.succeeded + summary.failed, summary.total);
+    });
+}
+
+/// Property: batch_calculate_view never mutates contract state, even when processing batches with errors
+#[test]
+fn prop_batch_view_never_mutates_state() {
+    proptest!(|(requests in arb_batch_requests())| {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, SLACalculatorContract);
+        let client = SLACalculatorContract::new_client(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let operator = Address::generate(&env);
+        client.initialize(&admin, &operator);
+
+        // Get initial state
+        let initial_stats = client.get_stats();
+        let initial_history_len = client.get_history().len();
+        let initial_admin = client.get_admin();
+        let initial_operator = client.get_operator();
+
+        // Convert std::vec::Vec to soroban_sdk::Vec
+        let mut soroban_requests = Vec::new(&env);
+        for req in requests {
+            soroban_requests.push_back(req);
+        }
+
+        // Call view version - should not change anything
+        let _ = client.batch_calculate_view(&soroban_requests);
+
+        // Verify all state is unchanged
+        let final_stats = client.get_stats();
+        let final_history_len = client.get_history().len();
+        let final_admin = client.get_admin();
+        let final_operator = client.get_operator();
+
+        assert_eq!(initial_stats, final_stats, "Stats must not change after view call");
+        assert_eq!(initial_history_len, final_history_len, "History length must not change after view call");
+        assert_eq!(initial_admin, final_admin, "Admin must not change after view call");
+        assert_eq!(initial_operator, final_operator, "Operator must not change after view call");
+    });
 }
