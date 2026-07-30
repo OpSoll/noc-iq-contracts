@@ -1244,7 +1244,7 @@ fn test_config_version_hash_collision_resistance() {
 // ============================================================
 
 #[test]
-#[should_panic(expected = "InvalidThreshold")]
+#[should_panic(expected = "ThresholdOutOfBounds")]
 fn test_empty_batch_rejected() {
     let (env, client, actors) = setup();
     // Create empty batch
@@ -1253,7 +1253,7 @@ fn test_empty_batch_rejected() {
 }
 
 #[test]
-#[should_panic(expected = "InvalidThreshold")]
+#[should_panic(expected = "ThresholdOutOfBounds")]
 fn test_oversized_batch_rejected() {
     let (env, client, actors) = setup();
     // Create batch with 51 items (exceeds limit of 50)
@@ -5307,7 +5307,7 @@ fn test_error_invalid_threshold_is_terminal() {
     let (_env, client, actors) = setup();
     // threshold=0 is always invalid for any severity
     let result = client.try_set_config(&actors.admin, &symbol_short!("low"), &0, &10, &600);
-    assert_eq!(result.unwrap_err().unwrap(), SLAError::InvalidThreshold);
+    assert_eq!(result.unwrap_err().unwrap(), SLAError::ThresholdOutOfBounds);
 }
 
 #[test]
@@ -5315,7 +5315,7 @@ fn test_error_invalid_penalty_is_terminal() {
     let (_env, client, actors) = setup();
     // penalty=0 is always invalid
     let result = client.try_set_config(&actors.admin, &symbol_short!("low"), &120, &0, &600);
-    assert_eq!(result.unwrap_err().unwrap(), SLAError::InvalidPenalty);
+    assert_eq!(result.unwrap_err().unwrap(), SLAError::PenaltyOutOfBounds);
 }
 
 #[test]
@@ -5323,7 +5323,7 @@ fn test_error_invalid_reward_is_terminal() {
     let (_env, client, actors) = setup();
     // reward=0 is always invalid
     let result = client.try_set_config(&actors.admin, &symbol_short!("low"), &120, &10, &0);
-    assert_eq!(result.unwrap_err().unwrap(), SLAError::InvalidReward);
+    assert_eq!(result.unwrap_err().unwrap(), SLAError::RewardOutOfBounds);
 }
 
 #[test]

@@ -1,7 +1,7 @@
 
 use soroban_sdk::{symbol_short, Env, Symbol};
 
-use crate::{SLAResult, SLAError, SLAConfig, ADMIN_KEY, OPERATOR_KEY, CONFIG_KEY, HISTORY_KEY};
+use crate::{SLAResult, SLAError, SLAConfig, OPERATOR_KEY, CONFIG_KEY};
 
 // -----------------------------------------------------------------------
 // Types
@@ -230,11 +230,11 @@ pub fn validate_batch(
     requests: &soroban_sdk::Vec<BatchRequest>,
 ) -> Result<u32, SLAError> {
     if requests.len() == 0 {
-        return Err(SLAError::InvalidThreshold);
+        return Err(SLAError::ThresholdOutOfBounds);
     }
 
     if requests.len() > get_batch_limit() {
-        return Err(SLAError::InvalidThreshold);
+        return Err(SLAError::ThresholdOutOfBounds);
     }
 
     // Check for duplicate outage IDs
