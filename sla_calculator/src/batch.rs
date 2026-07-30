@@ -1,8 +1,6 @@
-#![no_std]
-
 use soroban_sdk::{symbol_short, Env, Symbol};
 
-use crate::{SLAResult, SLAError, SLAConfig, ADMIN_KEY, OPERATOR_KEY, CONFIG_KEY, HISTORY_KEY};
+use crate::{SLAResult, SLAError, SLAConfig, OPERATOR_KEY, CONFIG_KEY};
 
 // -----------------------------------------------------------------------
 // Types
@@ -122,7 +120,7 @@ pub fn batch_calculate(
                 let error_msg = match e {
                     SLAError::ConfigNotFound => symbol_short!("no_config"),
                     SLAError::InvalidSeverity => symbol_short!("bad_sev"),
-                    SLAError::InvalidThreshold => symbol_short!("bad_thresh"),
+                    SLAError::InvalidThreshold | SLAError::ThresholdOutOfBounds => symbol_short!("bad_thres"),
                     _ => symbol_short!("unknown"),
                 };
                 results.push_back(BatchResult {
@@ -147,7 +145,7 @@ pub fn batch_calculate(
 }
 
 /// Process a single batch item (view-only, no persistence).
-fn process_single(
+pub fn process_single(
     env: &Env,
     configs: &soroban_sdk::Map<Symbol, SLAConfig>,
     req: &BatchRequest,
@@ -180,7 +178,7 @@ fn process_single(
         let overtime = (req.mttr_minutes - threshold) as i128;
         let penalty = overtime.saturating_mul(cfg.penalty_per_minute);
         Ok(SLAResult {
-            outage_id: req.outage_id,
+            outage_id: req.outage_id.clone(),
             status: symbol_short!("viol"),
             mttr_minutes: req.mttr_minutes,
             threshold_minutes: threshold,
@@ -207,7 +205,7 @@ fn process_single(
             .div_euclid(100);
 
         Ok(SLAResult {
-            outage_id: req.outage_id,
+            outage_id: req.outage_id.clone(),
             status: symbol_short!("met"),
             mttr_minutes: req.mttr_minutes,
             threshold_minutes: threshold,
@@ -231,11 +229,11 @@ pub fn validate_batch(
     requests: &soroban_sdk::Vec<BatchRequest>,
 ) -> Result<u32, SLAError> {
     if requests.len() == 0 {
-        return Err(SLAError::InvalidThreshold);
+        return Err(SLAError::ThresholdOutOfBounds);
     }
 
     if requests.len() > get_batch_limit() {
-        return Err(SLAError::InvalidThreshold);
+        return Err(SLAError::ThresholdOutOfBounds);
     }
 
     // Check for duplicate outage IDs

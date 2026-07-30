@@ -1,4 +1,4 @@
-#![no_std]
+
 
 use soroban_sdk::{symbol_short, Address, Env, Symbol};
 

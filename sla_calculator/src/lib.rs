@@ -33,6 +33,7 @@ const PAUSED_KEY: Symbol = symbol_short!("PAUSED"); // #27
 const PAUSE_INFO_KEY: Symbol = symbol_short!("PAUSEINF"); // #66
 const STATS_KEY: Symbol = symbol_short!("STATS"); // #29
 const HISTORY_KEY: Symbol = symbol_short!("HIST");
+const INIT_TIME_KEY: Symbol = symbol_short!("INIT_TIME");
 const STORAGE_VERSION_KEY: Symbol = symbol_short!("VER");
 const STORAGE_VERSION: u32 = 1;
 const RESULT_SCHEMA_VERSION: u32 = 1;
@@ -113,6 +114,9 @@ pub enum SLAError {
     InvalidOutageId = 16,          // SC-W5-077
     MalformedSymbolInput = 17,     // SC-W5-077
     InvalidMTTR = 18,              // SC-W5-471
+    ThresholdOutOfBounds = 19,
+    PenaltyOutOfBounds = 20,
+    RewardOutOfBounds = 21,
 }
 
 // -----------------------------------------------------------------------
@@ -303,6 +307,21 @@ pub struct VersionInfo {
     pub contract_name: Symbol,
 }
 
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InitializationStatus {
+    pub is_initialized: bool,
+    pub initialized_at: u64,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HistorySummary {
+    pub total: u32,
+    pub met: u32,
+    pub violated: u32,
+}
+
 // -----------------------------------------------------------------------
 // Contract implementation
 // -----------------------------------------------------------------------
@@ -337,6 +356,7 @@ impl SLACalculatorContract {
         env.storage()
             .instance()
             .set(&HISTORY_KEY, &Vec::<SLAResult>::new(&env));
+        env.storage().instance().set(&INIT_TIME_KEY, &env.ledger().timestamp());
 
         let mut configs = Map::<Symbol, SLAConfig>::new(&env);
         configs.set(
@@ -642,11 +662,7 @@ impl SLACalculatorContract {
         Ok(())
     }
 
-    /// Returns the pending operator address, if any.
-    pub fn get_pending_operator(env: Env) -> Result<Option<Address>, SLAError> {
-        Self::check_version(&env)?;
-        Ok(env.storage().instance().get(&PENDING_OP_KEY))
-    }
+
 
     // -------------------------------------------------------------------
     // #65 – Admin renounce
@@ -801,7 +817,12 @@ impl SLACalculatorContract {
     /// when config is unchanged.
     pub fn get_config_version_hash(env: Env) -> Result<u64, SLAError> {
         Self::check_version(&env)?;
-        Self::compute_config_version_hash(&env)
+        let configs: Map<Symbol, SLAConfig> = env
+            .storage()
+            .instance()
+            .get(&CONFIG_KEY)
+            .ok_or(SLAError::NotInitialized)?;
+        Self::compute_config_version_hash(&env, &configs)
     }
 
     /// SC-W5-046 – Returns the full catalogue of typed failure codes.
@@ -820,7 +841,7 @@ impl SLACalculatorContract {
 
         // Emit in numeric order for deterministic consumption
         // All descriptions must be <= 32 bytes (Soroban Symbol constraint)
-        let entries: [(u32, &str, &str); 16] = [
+        let entries: [(u32, &str, &str); 19] = [
             (1, "AlreadyInitialized", "Contract already initialized"),
             (2, "NotInitialized", "Contract not yet initialized"),
             (3, "Unauthorized", "Caller lacks required role"),
@@ -841,6 +862,9 @@ impl SLACalculatorContract {
             (14, "InvalidPenaltyAmount", "Invalid penalty amount"),
             (15, "InvalidRewardAmount", "Invalid reward amount"),
             (18, "InvalidMTTR", "MTTR must be greater than zero"),
+            (19, "ThresholdOutOfBounds", "Threshold out of bounds"),
+            (20, "PenaltyOutOfBounds", "Penalty out of bounds"),
+            (21, "RewardOutOfBounds", "Reward out of bounds"),
         ];
 
         for (code, label, description) in entries {
@@ -955,8 +979,9 @@ impl SLACalculatorContract {
             return Err(SLAError::InvalidMTTR);
         }
         // We bypass pause and operator checks to allow continuous, public verification
-        let cfg = Self::load_config(&env, &severity)?;
-        let config_version_hash = Self::compute_config_version_hash(&env)?;
+        let configs: Map<Symbol, SLAConfig> = env.storage().instance().get(&CONFIG_KEY).ok_or(SLAError::NotInitialized)?;
+        let cfg = configs.get(severity.clone()).ok_or(SLAError::ConfigNotFound)?;
+        let config_version_hash = Self::compute_config_version_hash(&env, &configs)?;
 
         // Delegate to pure internal math without mutating state or emitting events.
 
@@ -1019,7 +1044,7 @@ impl SLACalculatorContract {
                     let error_msg = match e {
                         SLAError::ConfigNotFound => symbol_short!("no_config"),
                         SLAError::InvalidSeverity => symbol_short!("bad_sev"),
-                        SLAError::InvalidThreshold => symbol_short!("bad_thresh"),
+                        SLAError::InvalidThreshold | SLAError::ThresholdOutOfBounds => symbol_short!("bad_thres"),
                         _ => symbol_short!("unknown"),
                     };
                     results.push_back(crate::batch::BatchResult {
@@ -1075,8 +1100,9 @@ impl SLACalculatorContract {
         Self::require_not_paused(&env)?; // #27
         Self::require_operator(&env, &caller)?; // #28
 
-        let cfg = Self::load_config(&env, &severity)?;
-        let config_version_hash = Self::compute_config_version_hash(&env)?;
+        let configs: Map<Symbol, SLAConfig> = env.storage().instance().get(&CONFIG_KEY).ok_or(SLAError::NotInitialized)?;
+        let cfg = configs.get(severity.clone()).ok_or(SLAError::ConfigNotFound)?;
+        let config_version_hash = Self::compute_config_version_hash(&env, &configs)?;
         let result = Self::compute_result(
             outage_id.clone(),
             mttr_minutes,
@@ -1343,17 +1369,17 @@ impl SLACalculatorContract {
 
         // Threshold must be between 1 and 1440 minutes (24 hours max)
         if threshold_minutes == 0 || threshold_minutes > 1440 {
-            return Err(SLAError::InvalidThreshold);
+            return Err(SLAError::ThresholdOutOfBounds);
         }
 
         // Penalty must be positive and reasonable (1 to 10000 per minute)
         if penalty_per_minute <= 0 || penalty_per_minute > 10000 {
-            return Err(SLAError::InvalidPenalty);
+            return Err(SLAError::PenaltyOutOfBounds);
         }
 
         // Reward base must be positive and reasonable (1 to 100000)
         if reward_base <= 0 || reward_base > 100000 {
-            return Err(SLAError::InvalidReward);
+            return Err(SLAError::RewardOutOfBounds);
         }
 
         // Severity-specific validation to ensure logical consistency
@@ -1457,7 +1483,7 @@ impl SLACalculatorContract {
     }
 
     /// Shared config lookup that borrows env (avoids consuming it).
-    fn compute_config_version_hash(env: &Env) -> Result<u64, SLAError> {
+    fn compute_config_version_hash(env: &Env, configs: &Map<Symbol, SLAConfig>) -> Result<u64, SLAError> {
         let severities = [
             symbol_short!("critical"),
             symbol_short!("high"),
@@ -1472,7 +1498,7 @@ impl SLACalculatorContract {
         let mut power: u64 = 1;
 
         for sev in severities {
-            let cfg = Self::load_config(env, &sev)?;
+            let cfg = configs.get(sev.clone()).ok_or(SLAError::ConfigNotFound)?;
 
             hash = hash
                 .wrapping_mul(BASE)
@@ -1577,6 +1603,40 @@ impl SLACalculatorContract {
     // -------------------------------------------------------------------
     // #33 - History & Compaction (Admin only)
     // -------------------------------------------------------------------
+
+    pub fn get_initialization_status(env: Env) -> InitializationStatus {
+        let is_initialized = env.storage().instance().has(&ADMIN_KEY);
+        let initialized_at: u64 = env.storage().instance().get(&INIT_TIME_KEY).unwrap_or(0);
+        InitializationStatus {
+            is_initialized,
+            initialized_at,
+        }
+    }
+
+    pub fn get_history_summary(env: Env) -> Result<HistorySummary, SLAError> {
+        Self::check_version(&env)?;
+        let history: Vec<SLAResult> = env
+            .storage()
+            .instance()
+            .get(&HISTORY_KEY)
+            .unwrap_or_else(|| Vec::new(&env));
+            
+        let mut total = 0;
+        let mut met = 0;
+        let mut violated = 0;
+        
+        for i in 0..history.len() {
+            let entry = history.get(i).unwrap();
+            total += 1;
+            if entry.status == symbol_short!("met") {
+                met += 1;
+            } else if entry.status == symbol_short!("viol") {
+                violated += 1;
+            }
+        }
+        
+        Ok(HistorySummary { total, met, violated })
+    }
 
     /// Returns the raw log of recent SLA calculations stored on-chain.
     pub fn get_history(env: Env) -> Result<Vec<SLAResult>, SLAError> {
