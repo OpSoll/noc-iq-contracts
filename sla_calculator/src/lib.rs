@@ -865,6 +865,17 @@ impl SLACalculatorContract {
         Self::compute_config_version_hash(&env, &configs)
     }
 
+    /// Returns a deterministic hash of an SLAResult payload using the same
+    /// polynomial rolling hash algorithm as `get_config_version_hash`.
+    ///
+    /// Off-chain backend services can use this to verify whether a given
+    /// SLAResult matches an authentic contract outcome without re-executing
+    /// stateful calculation calls.
+    pub fn compute_result_hash(env: Env, result: SLAResult) -> Result<u64, SLAError> {
+        Self::check_version(&env)?;
+        Ok(Self::compute_result_hash_inner(&result))
+    }
+
     /// SC-W5-046 – Returns the full catalogue of typed failure codes.
     ///
     /// Backend bridge consumers call this once at startup to pre-load all
@@ -1621,6 +1632,38 @@ impl SLACalculatorContract {
         }
 
         Ok(hash.wrapping_mul(BASE).wrapping_add(0x9e3779b97f4a7c15u64) % MODULUS)
+    }
+
+    fn compute_result_hash_inner(result: &SLAResult) -> u64 {
+        const BASE: u64 = 91138233;
+        const MODULUS: u64 = (1u64 << 63) - 25;
+
+        let mut hash: u64 = 1;
+        let mut power: u64 = 1;
+
+        macro_rules! mix {
+            ($v:expr) => {
+                hash = hash
+                    .wrapping_mul(BASE)
+                    .wrapping_add($v as u64)
+                    .wrapping_mul(power)
+                    % MODULUS;
+                power = power.wrapping_mul(BASE) % MODULUS;
+            };
+        }
+
+        mix!(result.outage_id.to_val().get_payload());
+        mix!(result.status.to_val().get_payload());
+        mix!(result.mttr_minutes);
+        mix!(result.threshold_minutes);
+        mix!(result.amount as u64);
+        mix!((result.amount >> 64) as u64);
+        mix!(result.payment_type.to_val().get_payload());
+        mix!(result.rating.to_val().get_payload());
+        mix!(result.config_version_hash);
+        mix!(result.recorded_at);
+
+        hash.wrapping_mul(BASE).wrapping_add(0x9e3779b97f4a7c15u64) % MODULUS
     }
 
     /// Optimised config lookup with severity index pre-check for early rejection.
