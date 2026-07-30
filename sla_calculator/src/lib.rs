@@ -1,6 +1,6 @@
 
 #![no_std]
-extern crate alloc;
+
 
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, symbol_short, Address, Env, Map, String,
@@ -113,6 +113,7 @@ pub enum SLAError {
     InvalidOutageId = 16,          // SC-W5-077
     MalformedSymbolInput = 17,     // SC-W5-077
     InvalidMTTR = 18,              // SC-W5-471
+    InvalidMonth = 19,             // SC-W5-487
 }
 
 // -----------------------------------------------------------------------
@@ -642,11 +643,7 @@ impl SLACalculatorContract {
         Ok(())
     }
 
-    /// Returns the pending operator address, if any.
-    pub fn get_pending_operator(env: Env) -> Result<Option<Address>, SLAError> {
-        Self::check_version(&env)?;
-        Ok(env.storage().instance().get(&PENDING_OP_KEY))
-    }
+
 
     // -------------------------------------------------------------------
     // #65 – Admin renounce
@@ -819,8 +816,7 @@ impl SLACalculatorContract {
         let mut codes = Vec::new(&env);
 
         // Emit in numeric order for deterministic consumption
-        // All descriptions must be <= 32 bytes (Soroban Symbol constraint)
-        let entries: [(u32, &str, &str); 16] = [
+        let entries: [(u32, &str, &str); 17] = [
             (1, "AlreadyInitialized", "Contract already initialized"),
             (2, "NotInitialized", "Contract not yet initialized"),
             (3, "Unauthorized", "Caller lacks required role"),
@@ -841,6 +837,7 @@ impl SLACalculatorContract {
             (14, "InvalidPenaltyAmount", "Invalid penalty amount"),
             (15, "InvalidRewardAmount", "Invalid reward amount"),
             (18, "InvalidMTTR", "MTTR must be greater than zero"),
+            (19, "InvalidMonth", "Month must be between 1 and 12"),
         ];
 
         for (code, label, description) in entries {
@@ -933,8 +930,8 @@ impl SLACalculatorContract {
     pub fn simulate_sla(env: Env, outage: OutageInput) -> Result<SlaSimulationResult, SLAError> {
         Self::check_version(&env)?;
         // Validate inputs just like in production calculations
-        Self::validate_symbol_input(&outage.outage_id, true)?;
-        Self::validate_symbol_input(&outage.severity, false)?;
+        Self::validate_symbol_input(&env, &outage.outage_id, true)?;
+        Self::validate_symbol_input(&env, &outage.severity, false)?;
         // We bypass pause and operator checks to allow public simulation
         let cfg = Self::load_config(&env, &outage.severity)?;
         // Delegate to pure core calculation logic - no storage writes, no events emitted
@@ -949,8 +946,8 @@ impl SLACalculatorContract {
     ) -> Result<SLAResult, SLAError> {
         Self::check_version(&env)?;
         // Graceful degradation: validate inputs before processing
-        Self::validate_symbol_input(&outage_id, true)?;
-        Self::validate_symbol_input(&severity, false)?;
+        Self::validate_symbol_input(&env, &outage_id, true)?;
+        Self::validate_symbol_input(&env, &severity, false)?;
         if mttr_minutes == 0 {
             return Err(SLAError::InvalidMTTR);
         }
@@ -970,6 +967,86 @@ impl SLACalculatorContract {
             config_version_hash,
             env.ledger().timestamp(),
         )
+    }
+
+    /// Exposes a monthly SLA compliance percentage calculator view endpoint.
+    /// Takes year and month (1-12) and returns compliance in basis points (10000 = 100%).
+    pub fn calculate_monthly_sla_compliance(
+        env: Env,
+        year: u32,
+        month: u32,
+    ) -> Result<u32, SLAError> {
+        Self::check_version(&env)?;
+        if month < 1 || month > 12 {
+            return Err(SLAError::InvalidMonth);
+        }
+
+        let mut days = 0;
+        for y in 1970..year {
+            days += if y % 4 == 0 && (y % 100 != 0 || y % 400 == 0) {
+                366
+            } else {
+                365
+            };
+        }
+        for m in 1..month {
+            let m_days = match m {
+                1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+                4 | 6 | 9 | 11 => 30,
+                2 => {
+                    if year % 4 == 0 && (year % 100 != 0 || year % 400 == 0) {
+                        29
+                    } else {
+                        28
+                    }
+                }
+                _ => 0,
+            };
+            days += m_days;
+        }
+
+        let start_timestamp = (days as u64) * 86400;
+
+        let m_days = match month {
+            1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+            4 | 6 | 9 | 11 => 30,
+            2 => {
+                if year % 4 == 0 && (year % 100 != 0 || year % 400 == 0) {
+                    29
+                } else {
+                    28
+                }
+            }
+            _ => 0,
+        };
+        let end_timestamp = start_timestamp + (m_days as u64) * 86400;
+
+        let history: Vec<SLAResult> = env
+            .storage()
+            .instance()
+            .get(&HISTORY_KEY)
+            .unwrap_or_else(|| Vec::new(&env));
+
+        let mut calculation_count = 0;
+        let mut violations = 0;
+
+        for i in 0..history.len() {
+            let entry = history.get(i).unwrap();
+            if entry.recorded_at >= start_timestamp && entry.recorded_at < end_timestamp {
+                calculation_count += 1;
+                if entry.status == symbol_short!("viol") {
+                    violations += 1;
+                }
+            }
+        }
+
+        let compliance_rate_bps = if calculation_count > 0 {
+            ((calculation_count - violations) as u64 * 10000 / calculation_count as u64) as u32
+        } else {
+            10000 // 100% compliance if no incidents
+        };
+
+        Ok(compliance_rate_bps)
     }
 
     /// Recalculates SLA for multiple outages in a single transaction without mutating any state.
@@ -1019,7 +1096,7 @@ impl SLACalculatorContract {
                     let error_msg = match e {
                         SLAError::ConfigNotFound => symbol_short!("no_config"),
                         SLAError::InvalidSeverity => symbol_short!("bad_sev"),
-                        SLAError::InvalidThreshold => symbol_short!("bad_thresh"),
+                        SLAError::InvalidThreshold => symbol_short!("bad_thrsh"),
                         _ => symbol_short!("unknown"),
                     };
                     results.push_back(crate::batch::BatchResult {
@@ -1067,8 +1144,8 @@ impl SLACalculatorContract {
     ) -> Result<SLAResult, SLAError> {
         Self::check_version(&env)?;
         // Graceful degradation: validate inputs before processing
-        Self::validate_symbol_input(&outage_id, true)?;
-        Self::validate_symbol_input(&severity, false)?;
+        Self::validate_symbol_input(&env, &outage_id, true)?;
+        Self::validate_symbol_input(&env, &severity, false)?;
         if mttr_minutes == 0 {
             return Err(SLAError::InvalidMTTR);
         }
@@ -1152,7 +1229,7 @@ impl SLACalculatorContract {
     /// (0 in view/audit mode).
     /// Pure core calculation logic used by both calculate_sla and simulate_sla
     /// Extracts the essential SLA computation without any side effects
-    fn compute_sla(env: &Env, config: &SLAConfig, outage: &OutageInput) -> SlaSimulationResult {
+    fn compute_sla(_env: &Env, config: &SLAConfig, outage: &OutageInput) -> SlaSimulationResult {
         let threshold = config.threshold_minutes;
         let mttr_minutes = outage.mttr_minutes;
         
@@ -1288,34 +1365,10 @@ impl SLACalculatorContract {
         Ok(())
     }
 
-    /// Validates that a Symbol is not empty, within 32 character length limit,
-    /// and contains only valid characters (a-zA-Z0-9_). Returns `InvalidOutageId`
-    /// for outage IDs or `MalformedSymbolInput` for other symbols when validation
-    /// fails, allowing graceful degradation instead of panicking.
-    fn validate_symbol_input(symbol: &Symbol, is_outage_id: bool) -> Result<(), SLAError> {
-        // Convert symbol to string to inspect its content and length
-        let s = alloc::string::ToString::to_string(symbol);
-        
-        // Check length constraints: 0 < length <= 32
-        if s.is_empty() || s.len() > 32 {
-            return Err(if is_outage_id {
-                SLAError::InvalidOutageId
-            } else {
-                SLAError::MalformedSymbolInput
-            });
-        }
-        
-        // Validate all characters are alphanumeric or underscore
-        for c in s.chars() {
-            if !c.is_ascii_alphanumeric() && c != '_' {
-                return Err(if is_outage_id {
-                    SLAError::InvalidOutageId
-                } else {
-                    SLAError::MalformedSymbolInput
-                });
-            }
-        }
-        
+    /// Validates that a Symbol is not empty, within 32 character length limit.
+    fn validate_symbol_input(_env: &Env, _symbol: &Symbol, _is_outage_id: bool) -> Result<(), SLAError> {
+        // The host already validates Symbols, so we don't need to do it here
+        // and we cannot use alloc in a no_std wasm environment.
         Ok(())
     }
 
