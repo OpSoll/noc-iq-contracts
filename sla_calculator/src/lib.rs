@@ -85,6 +85,7 @@ const EVENT_ADMIN_REN: Symbol = symbol_short!("adm_ren"); // #65
 const EVENT_OP_PROP: Symbol = symbol_short!("op_prop"); // #64
 const EVENT_OP_ACC: Symbol = symbol_short!("op_acc"); // #64
 const EVENT_OP_CAN: Symbol = symbol_short!("op_can"); // SC-024
+const EVENT_OP_REV: Symbol = symbol_short!("op_rev"); // #472
 const EVENT_VERSION: Symbol = symbol_short!("v1");
 
 // -----------------------------------------------------------------------
@@ -498,6 +499,28 @@ impl SLACalculatorContract {
         env.events().publish(
             (EVENT_OP_SET, EVENT_VERSION, caller),
             (new_operator.clone(),),
+        );
+
+        Ok(())
+    }
+
+    /// #472 – Revoke the operator role entirely (admin only).
+    ///
+    /// Removes the operator address and any pending operator proposal from
+    /// contract storage. After revocation, `calculate_sla` will fail with
+    /// `Unauthorized` until a new operator is configured via `set_operator`
+    /// or the two-step handoff (`propose_operator` / `accept_operator`).
+    /// Emits an `op_rev` event with the caller address context.
+    pub fn revoke_operator(env: Env, caller: Address) -> Result<(), SLAError> {
+        Self::check_version(&env)?;
+        Self::require_admin(&env, &caller)?;
+
+        env.storage().instance().remove(&OPERATOR_KEY);
+        env.storage().instance().remove(&PENDING_OP_KEY);
+
+        env.events().publish(
+            (EVENT_OP_REV, EVENT_VERSION, caller),
+            (),
         );
 
         Ok(())
