@@ -110,7 +110,7 @@ pub fn batch_calculate(
                     total_rewards = total_rewards.saturating_add(result.amount);
                 }
                 results.push_back(BatchResult {
-                    outage_id: req.outage_id,
+                    outage_id: req.outage_id.clone(),
                     success: true,
                     result: Some(result),
                     error: None,
@@ -121,11 +121,11 @@ pub fn batch_calculate(
                 let error_msg = match e {
                     SLAError::ConfigNotFound => symbol_short!("no_config"),
                     SLAError::InvalidSeverity => symbol_short!("bad_sev"),
-                    SLAError::InvalidThreshold => symbol_short!("bad_thrsh"),
+                    SLAError::InvalidThreshold => symbol_short!("bad_thres"),
                     _ => symbol_short!("unknown"),
                 };
                 results.push_back(BatchResult {
-                    outage_id: req.outage_id,
+                    outage_id: req.outage_id.clone(),
                     success: false,
                     result: None,
                     error: Some(error_msg),
@@ -230,11 +230,11 @@ pub fn validate_batch(
     requests: &soroban_sdk::Vec<BatchRequest>,
 ) -> Result<u32, SLAError> {
     if requests.len() == 0 {
-        return Err(SLAError::InvalidThreshold);
+        return Err(SLAError::ThresholdOutOfBounds);
     }
 
     if requests.len() > get_batch_limit() {
-        return Err(SLAError::InvalidThreshold);
+        return Err(SLAError::ThresholdOutOfBounds);
     }
 
     // Check for duplicate outage IDs
