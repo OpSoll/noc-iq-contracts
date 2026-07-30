@@ -186,7 +186,7 @@ mod event_state_tests {
         let new_config = SLAConfig {
             threshold_minutes: 25,
             penalty_per_minute: 120,
-            reward_base: 900,
+            reward_base: 900, top_tier_multiplier: 200, excel_tier_multiplier: 150, good_tier_multiplier: 100,
         };
 
         client.set_config(
@@ -233,11 +233,11 @@ mod event_state_tests {
         let (admin, _, client) = setup(&env);
 
         // Update critical
-        client.set_config(&admin, &symbol_short!("critical"), &20, &150, &850);
+        client.set_config(&admin, &symbol_short!("critical"), &20, &150, &850, &200, &150, &100);
         let critical_stored = client.get_config(&symbol_short!("critical"));
 
         // Update high
-        client.set_config(&admin, &symbol_short!("high"), &40, &75, &780);
+        client.set_config(&admin, &symbol_short!("high"), &40, &75, &780, &200, &150, &100);
         let high_stored = client.get_config(&symbol_short!("high"));
 
         // Verify last event matches high config
@@ -549,7 +549,7 @@ mod event_state_tests {
             &symbol_short!("critical"),
             &5,
         );
-        client.set_config(&admin, &symbol_short!("critical"), &20, &200, &1000);
+        client.set_config(&admin, &symbol_short!("critical"), &20, &200, &1000, &200, &150, &100);
 
         let events = env.events().all();
         for i in 0..events.len() {

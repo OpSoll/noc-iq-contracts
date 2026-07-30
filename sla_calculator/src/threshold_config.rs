@@ -24,7 +24,7 @@ mod threshold_tests {
             &SLAConfig {
                 threshold_minutes: 0,
                 penalty_per_minute: 10,
-                reward_base: 100,
+                reward_base: 100, top_tier_multiplier: 200, excel_tier_multiplier: 150, good_tier_multiplier: 100,
             },
         );
         let result = client.calculate_sla(
@@ -46,7 +46,7 @@ mod threshold_tests {
             &SLAConfig {
                 threshold_minutes: 1,
                 penalty_per_minute: 5,
-                reward_base: 50,
+                reward_base: 50, top_tier_multiplier: 200, excel_tier_multiplier: 150, good_tier_multiplier: 100,
             },
         );
         let met = client.calculate_sla(

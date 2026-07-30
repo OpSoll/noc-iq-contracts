@@ -127,7 +127,7 @@ pub fn execute_rollback(
         SLAConfig {
             threshold_minutes: 15,
             penalty_per_minute: 100,
-            reward_base: 750,
+            reward_base: 750, top_tier_multiplier: 200, excel_tier_multiplier: 150, good_tier_multiplier: 100,
         },
     );
     configs.set(
@@ -135,7 +135,7 @@ pub fn execute_rollback(
         SLAConfig {
             threshold_minutes: 30,
             penalty_per_minute: 50,
-            reward_base: 750,
+            reward_base: 750, top_tier_multiplier: 200, excel_tier_multiplier: 150, good_tier_multiplier: 100,
         },
     );
     configs.set(
@@ -143,7 +143,7 @@ pub fn execute_rollback(
         SLAConfig {
             threshold_minutes: 60,
             penalty_per_minute: 25,
-            reward_base: 750,
+            reward_base: 750, top_tier_multiplier: 200, excel_tier_multiplier: 150, good_tier_multiplier: 100,
         },
     );
     configs.set(
@@ -151,7 +151,7 @@ pub fn execute_rollback(
         SLAConfig {
             threshold_minutes: 120,
             penalty_per_minute: 10,
-            reward_base: 600,
+            reward_base: 600, top_tier_multiplier: 200, excel_tier_multiplier: 150, good_tier_multiplier: 100,
         },
     );
 
