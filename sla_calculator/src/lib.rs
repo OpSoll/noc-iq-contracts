@@ -18,6 +18,7 @@ mod event_schema;
 pub mod adaptive_tuning;
 pub mod version_negotiation;
 pub mod batch;
+pub mod storage_helpers;
 
 // -----------------------------------------------------------------------
 // Storage keys
@@ -116,6 +117,7 @@ pub enum SLAError {
     ThresholdOutOfBounds = 19,
     PenaltyOutOfBounds = 20,
     RewardOutOfBounds = 21,
+    InvalidMonth = 22,
 }
 
 // -----------------------------------------------------------------------
@@ -1031,8 +1033,8 @@ impl SLACalculatorContract {
     pub fn simulate_sla(env: Env, outage: OutageInput) -> Result<SlaSimulationResult, SLAError> {
         Self::check_version(&env)?;
         // Validate inputs just like in production calculations
-        Self::validate_symbol_input(&env, &outage.outage_id, true)?;
-        Self::validate_symbol_input(&env, &outage.severity, false)?;
+        Self::validate_symbol_input(&outage.outage_id, true)?;
+        Self::validate_symbol_input(&outage.severity, false)?;
         // We bypass pause and operator checks to allow public simulation
         let cfg = Self::load_config(&env, &outage.severity)?;
         // Delegate to pure core calculation logic - no storage writes, no events emitted
@@ -1047,8 +1049,8 @@ impl SLACalculatorContract {
     ) -> Result<SLAResult, SLAError> {
         Self::check_version(&env)?;
         // Graceful degradation: validate inputs before processing
-        Self::validate_symbol_input(&env, &outage_id, true)?;
-        Self::validate_symbol_input(&env, &severity, false)?;
+        Self::validate_symbol_input(&outage_id, true)?;
+        Self::validate_symbol_input(&severity, false)?;
         if mttr_minutes == 0 {
             return Err(SLAError::InvalidMTTR);
         }
@@ -1246,8 +1248,8 @@ impl SLACalculatorContract {
     ) -> Result<SLAResult, SLAError> {
         Self::check_version(&env)?;
         // Graceful degradation: validate inputs before processing
-        Self::validate_symbol_input(&env, &outage_id, true)?;
-        Self::validate_symbol_input(&env, &severity, false)?;
+        Self::validate_symbol_input(&outage_id, true)?;
+        Self::validate_symbol_input(&severity, false)?;
         if mttr_minutes == 0 {
             return Err(SLAError::InvalidMTTR);
         }
