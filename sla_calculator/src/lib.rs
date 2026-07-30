@@ -902,6 +902,77 @@ impl SLACalculatorContract {
         )
     }
 
+    /// Recalculates SLA for multiple outages in a single transaction without mutating any state.
+    /// Can be called by anyone for verification and audit purposes.
+    pub fn batch_calculate_view(
+        env: Env,
+        requests: soroban_sdk::Vec<crate::batch::BatchRequest>,
+    ) -> Result<(crate::batch::BatchSummary, soroban_sdk::Vec<crate::batch::BatchResult>), SLAError> {
+        Self::check_version(&env)?;
+        // Validate batch inputs before processing
+        crate::batch::validate_batch(&env, &requests)?;
+        
+        // Bypass all authorization and pause checks to allow public verification
+        let configs: soroban_sdk::Map<Symbol, SLAConfig> = env
+            .storage()
+            .instance()
+            .get(&CONFIG_KEY)
+            .ok_or(SLAError::NotInitialized)?;
+
+        let mut results = soroban_sdk::Vec::new(&env);
+        let mut succeeded: u32 = 0;
+        let mut failed: u32 = 0;
+        let mut total_rewards: i128 = 0;
+        let mut total_penalties: i128 = 0;
+
+        for i in 0..requests.len() {
+            let req = requests.get(i).unwrap();
+
+            // Try to calculate (no persistence, pure computation only)
+            match crate::batch::process_single(&env, &configs, &req) {
+                Ok(result) => {
+                    succeeded = succeeded.saturating_add(1);
+                    if result.status == symbol_short!("viol") {
+                        total_penalties = total_penalties.saturating_add(result.amount);
+                    } else {
+                        total_rewards = total_rewards.saturating_add(result.amount);
+                    }
+                    results.push_back(crate::batch::BatchResult {
+                        outage_id: req.outage_id,
+                        success: true,
+                        result: Some(result),
+                        error: None,
+                    });
+                }
+                Err(e) => {
+                    failed = failed.saturating_add(1);
+                    let error_msg = match e {
+                        SLAError::ConfigNotFound => symbol_short!("no_config"),
+                        SLAError::InvalidSeverity => symbol_short!("bad_sev"),
+                        SLAError::InvalidThreshold => symbol_short!("bad_thresh"),
+                        _ => symbol_short!("unknown"),
+                    };
+                    results.push_back(crate::batch::BatchResult {
+                        outage_id: req.outage_id,
+                        success: false,
+                        result: None,
+                        error: Some(error_msg),
+                    });
+                }
+            }
+        }
+
+        let summary = crate::batch::BatchSummary {
+            total: requests.len(),
+            succeeded,
+            failed,
+            total_rewards,
+            total_penalties,
+        };
+
+        Ok((summary, results))
+    }
+
     // -------------------------------------------------------------------
     // SLA calculation (operator only)                                #28
     // -------------------------------------------------------------------
