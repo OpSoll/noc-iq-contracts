@@ -997,8 +997,8 @@ impl SLACalculatorContract {
     pub fn simulate_sla(env: Env, outage: OutageInput) -> Result<SlaSimulationResult, SLAError> {
         Self::check_version(&env)?;
         // Validate inputs just like in production calculations
-        Self::validate_symbol_input(&outage.outage_id, true)?;
-        Self::validate_symbol_input(&outage.severity, false)?;
+        Self::validate_symbol_input(&env, &outage.outage_id, true)?;
+        Self::validate_symbol_input(&env, &outage.severity, false)?;
         // We bypass pause and operator checks to allow public simulation
         let cfg = Self::load_config(&env, &outage.severity)?;
         // Delegate to pure core calculation logic - no storage writes, no events emitted
@@ -1013,8 +1013,8 @@ impl SLACalculatorContract {
     ) -> Result<SLAResult, SLAError> {
         Self::check_version(&env)?;
         // Graceful degradation: validate inputs before processing
-        Self::validate_symbol_input(&outage_id, true)?;
-        Self::validate_symbol_input(&severity, false)?;
+        Self::validate_symbol_input(&env, &outage_id, true)?;
+        Self::validate_symbol_input(&env, &severity, false)?;
         if mttr_minutes == 0 {
             return Err(SLAError::InvalidMTTR);
         }
@@ -1035,6 +1035,86 @@ impl SLACalculatorContract {
             config_version_hash,
             env.ledger().timestamp(),
         )
+    }
+
+    /// Exposes a monthly SLA compliance percentage calculator view endpoint.
+    /// Takes year and month (1-12) and returns compliance in basis points (10000 = 100%).
+    pub fn calculate_monthly_sla_compliance(
+        env: Env,
+        year: u32,
+        month: u32,
+    ) -> Result<u32, SLAError> {
+        Self::check_version(&env)?;
+        if month < 1 || month > 12 {
+            return Err(SLAError::InvalidMonth);
+        }
+
+        let mut days = 0;
+        for y in 1970..year {
+            days += if y % 4 == 0 && (y % 100 != 0 || y % 400 == 0) {
+                366
+            } else {
+                365
+            };
+        }
+        for m in 1..month {
+            let m_days = match m {
+                1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+                4 | 6 | 9 | 11 => 30,
+                2 => {
+                    if year % 4 == 0 && (year % 100 != 0 || year % 400 == 0) {
+                        29
+                    } else {
+                        28
+                    }
+                }
+                _ => 0,
+            };
+            days += m_days;
+        }
+
+        let start_timestamp = (days as u64) * 86400;
+
+        let m_days = match month {
+            1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+            4 | 6 | 9 | 11 => 30,
+            2 => {
+                if year % 4 == 0 && (year % 100 != 0 || year % 400 == 0) {
+                    29
+                } else {
+                    28
+                }
+            }
+            _ => 0,
+        };
+        let end_timestamp = start_timestamp + (m_days as u64) * 86400;
+
+        let history: Vec<SLAResult> = env
+            .storage()
+            .instance()
+            .get(&HISTORY_KEY)
+            .unwrap_or_else(|| Vec::new(&env));
+
+        let mut calculation_count = 0;
+        let mut violations = 0;
+
+        for i in 0..history.len() {
+            let entry = history.get(i).unwrap();
+            if entry.recorded_at >= start_timestamp && entry.recorded_at < end_timestamp {
+                calculation_count += 1;
+                if entry.status == symbol_short!("viol") {
+                    violations += 1;
+                }
+            }
+        }
+
+        let compliance_rate_bps = if calculation_count > 0 {
+            ((calculation_count - violations) as u64 * 10000 / calculation_count as u64) as u32
+        } else {
+            10000 // 100% compliance if no incidents
+        };
+
+        Ok(compliance_rate_bps)
     }
 
     /// Recalculates SLA for multiple outages in a single transaction without mutating any state.
@@ -1132,8 +1212,8 @@ impl SLACalculatorContract {
     ) -> Result<SLAResult, SLAError> {
         Self::check_version(&env)?;
         // Graceful degradation: validate inputs before processing
-        Self::validate_symbol_input(&outage_id, true)?;
-        Self::validate_symbol_input(&severity, false)?;
+        Self::validate_symbol_input(&env, &outage_id, true)?;
+        Self::validate_symbol_input(&env, &severity, false)?;
         if mttr_minutes == 0 {
             return Err(SLAError::InvalidMTTR);
         }
