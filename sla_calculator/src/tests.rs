@@ -1661,6 +1661,80 @@ fn test_fixture_after_calculation_stats_are_updated() {
 }
 
 // ============================================================
+// #490 – SLA result verification hash
+// ============================================================
+
+#[test]
+fn test_compute_result_hash_is_deterministic() {
+    let (env, client, actors) = setup();
+
+    let result = client.calculate_sla(
+        &actors.operator,
+        &symbol_short!("HASH001"),
+        &symbol_short!("critical"),
+        &5,
+    );
+
+    let h1 = client.compute_result_hash(&result);
+    let h2 = client.compute_result_hash(&result);
+    assert_eq!(h1, h2, "Hash must be deterministic for identical results");
+}
+
+#[test]
+fn test_compute_result_hash_differs_for_different_results() {
+    let (env, client, actors) = setup();
+
+    let result_a = client.calculate_sla(
+        &actors.operator,
+        &symbol_short!("HASH002"),
+        &symbol_short!("critical"),
+        &5,
+    );
+
+    let result_b = client.calculate_sla(
+        &actors.operator,
+        &symbol_short!("HASH003"),
+        &symbol_short!("critical"),
+        &25,
+    );
+
+    let ha = client.compute_result_hash(&result_a);
+    let hb = client.compute_result_hash(&result_b);
+    assert_ne!(
+        ha, hb,
+        "Different outage results must produce different hashes"
+    );
+}
+
+#[test]
+fn test_compute_result_hash_same_fields_identical_hash() {
+    let (env, client, actors) = setup();
+
+    // Two separate calculations with identical inputs
+    let r1 = client.calculate_sla(
+        &actors.operator,
+        &symbol_short!("HASH_A"),
+        &symbol_short!("high"),
+        &20,
+    );
+    let r2 = client.calculate_sla(
+        &actors.operator,
+        &symbol_short!("HASH_B"),
+        &symbol_short!("high"),
+        &20,
+    );
+
+    // Both should be "met" with identical computed result fields
+    // (except outage_id which differs)
+    let h1 = client.compute_result_hash(&r1);
+    let h2 = client.compute_result_hash(&r2);
+    assert_ne!(
+        h1, h2,
+        "Different outage_ids must produce different hashes"
+    );
+}
+
+// ============================================================
 // #95 – Negative tests for malformed symbol inputs
 // ============================================================
 
