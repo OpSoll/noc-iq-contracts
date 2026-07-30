@@ -64,7 +64,7 @@ fn prop_sla_met_implies_positive_reward() {
         let result = client.calculate_sla_view(
             &symbol_short!("out_0"),
             &symbol_short!(severity),
-            &0,
+            &0,1,
         );
         assert_eq!(result.status, symbol_short!("met"));
         assert_eq!(result.payment_type, symbol_short!("rew"));
@@ -271,7 +271,7 @@ fn prop_zero_mttr_always_top_rating() {
         let result = client.calculate_sla_view(
             &symbol_short!("out_zero"),
             &symbol_short!(severity),
-            &0,
+            &0,1,
         );
         assert_eq!(result.rating, symbol_short!("top"));
     }

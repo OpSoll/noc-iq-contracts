@@ -126,7 +126,7 @@ fn fuzz_history_operations() {
     assert!(history.len() > 0);
 
     // Pagination should work
-    let page1 = client.get_history_page(&0, &5);
+    let page1 = client.get_history_page(&0,1, &5);
     let page2 = client.get_history_page(&5, &5);
     assert_eq!(page1.len(), 5);
     assert_eq!(page2.len(), 5);
