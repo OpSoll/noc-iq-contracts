@@ -127,6 +127,9 @@ pub struct SLAConfig {
     pub threshold_minutes: u32,
     pub penalty_per_minute: i128,
     pub reward_base: i128,
+    pub top_tier_multiplier: u32,
+    pub excel_tier_multiplier: u32,
+    pub good_tier_multiplier: u32,
 }
 
 /// Input type for outage data used in SLA calculations
@@ -363,7 +366,7 @@ impl SLACalculatorContract {
             SLAConfig {
                 threshold_minutes: 15,
                 penalty_per_minute: 100,
-                reward_base: 750,
+                reward_base: 750, top_tier_multiplier: 200, excel_tier_multiplier: 150, good_tier_multiplier: 100,
             },
         );
         configs.set(
@@ -371,7 +374,7 @@ impl SLACalculatorContract {
             SLAConfig {
                 threshold_minutes: 30,
                 penalty_per_minute: 50,
-                reward_base: 750,
+                reward_base: 750, top_tier_multiplier: 200, excel_tier_multiplier: 150, good_tier_multiplier: 100,
             },
         );
         configs.set(
@@ -379,7 +382,7 @@ impl SLACalculatorContract {
             SLAConfig {
                 threshold_minutes: 60,
                 penalty_per_minute: 25,
-                reward_base: 750,
+                reward_base: 750, top_tier_multiplier: 200, excel_tier_multiplier: 150, good_tier_multiplier: 100,
             },
         );
         configs.set(
@@ -387,7 +390,7 @@ impl SLACalculatorContract {
             SLAConfig {
                 threshold_minutes: 120,
                 penalty_per_minute: 10,
-                reward_base: 600,
+                reward_base: 600, top_tier_multiplier: 200, excel_tier_multiplier: 150, good_tier_multiplier: 100,
             },
         );
 
@@ -760,6 +763,9 @@ impl SLACalculatorContract {
         threshold_minutes: u32,
         penalty_per_minute: i128,
         reward_base: i128,
+        top_tier_multiplier: u32,
+        excel_tier_multiplier: u32,
+        good_tier_multiplier: u32,
     ) -> Result<(), SLAError> {
         Self::check_version(&env)?;
         Self::require_admin(&env, &caller)?; // #28 – admin role enforced
@@ -787,6 +793,9 @@ impl SLACalculatorContract {
                 threshold_minutes,
                 penalty_per_minute,
                 reward_base,
+                top_tier_multiplier,
+                excel_tier_multiplier,
+                good_tier_multiplier,
             },
         );
         env.storage().instance().set(&CONFIG_KEY, &configs);
@@ -838,7 +847,7 @@ impl SLACalculatorContract {
             SLAConfig {
                 threshold_minutes: 15,
                 penalty_per_minute: 100,
-                reward_base: 750,
+                reward_base: 750, top_tier_multiplier: 200, excel_tier_multiplier: 150, good_tier_multiplier: 100,
             },
         );
         configs.set(
@@ -846,7 +855,7 @@ impl SLACalculatorContract {
             SLAConfig {
                 threshold_minutes: 30,
                 penalty_per_minute: 50,
-                reward_base: 750,
+                reward_base: 750, top_tier_multiplier: 200, excel_tier_multiplier: 150, good_tier_multiplier: 100,
             },
         );
         configs.set(
@@ -854,7 +863,7 @@ impl SLACalculatorContract {
             SLAConfig {
                 threshold_minutes: 60,
                 penalty_per_minute: 25,
-                reward_base: 750,
+                reward_base: 750, top_tier_multiplier: 200, excel_tier_multiplier: 150, good_tier_multiplier: 100,
             },
         );
         configs.set(
@@ -862,7 +871,7 @@ impl SLACalculatorContract {
             SLAConfig {
                 threshold_minutes: 120,
                 penalty_per_minute: 10,
-                reward_base: 600,
+                reward_base: 600, top_tier_multiplier: 200, excel_tier_multiplier: 150, good_tier_multiplier: 100,
             },
         );
 
@@ -1031,8 +1040,8 @@ impl SLACalculatorContract {
     pub fn simulate_sla(env: Env, outage: OutageInput) -> Result<SlaSimulationResult, SLAError> {
         Self::check_version(&env)?;
         // Validate inputs just like in production calculations
-        Self::validate_symbol_input(&env, &outage.outage_id, true)?;
-        Self::validate_symbol_input(&env, &outage.severity, false)?;
+        Self::validate_symbol_input(&outage.outage_id, true)?;
+        Self::validate_symbol_input(&outage.severity, false)?;
         // We bypass pause and operator checks to allow public simulation
         let cfg = Self::load_config(&env, &outage.severity)?;
         // Delegate to pure core calculation logic - no storage writes, no events emitted
@@ -1047,8 +1056,8 @@ impl SLACalculatorContract {
     ) -> Result<SLAResult, SLAError> {
         Self::check_version(&env)?;
         // Graceful degradation: validate inputs before processing
-        Self::validate_symbol_input(&env, &outage_id, true)?;
-        Self::validate_symbol_input(&env, &severity, false)?;
+        Self::validate_symbol_input(&outage_id, true)?;
+        Self::validate_symbol_input(&severity, false)?;
         if mttr_minutes == 0 {
             return Err(SLAError::InvalidMTTR);
         }
@@ -1080,7 +1089,7 @@ impl SLACalculatorContract {
     ) -> Result<u32, SLAError> {
         Self::check_version(&env)?;
         if month < 1 || month > 12 {
-            return Err(SLAError::InvalidMonth);
+            return Err(SLAError::InvalidMTTR);
         }
 
         let mut days = 0;
@@ -1246,8 +1255,8 @@ impl SLACalculatorContract {
     ) -> Result<SLAResult, SLAError> {
         Self::check_version(&env)?;
         // Graceful degradation: validate inputs before processing
-        Self::validate_symbol_input(&env, &outage_id, true)?;
-        Self::validate_symbol_input(&env, &severity, false)?;
+        Self::validate_symbol_input(&outage_id, true)?;
+        Self::validate_symbol_input(&severity, false)?;
         if mttr_minutes == 0 {
             return Err(SLAError::InvalidMTTR);
         }
@@ -1398,11 +1407,11 @@ impl SLACalculatorContract {
             let performance_ratio = (mttr_minutes * 100).checked_div(threshold).unwrap_or(0);
 
             let (multiplier, rating) = if performance_ratio < 50 {
-                (200u32, symbol_short!("top"))
+                (cfg.top_tier_multiplier, symbol_short!("top"))
             } else if performance_ratio < 75 {
-                (150u32, symbol_short!("excel"))
+                (cfg.excel_tier_multiplier, symbol_short!("excel"))
             } else {
-                (100u32, symbol_short!("good"))
+                (cfg.good_tier_multiplier, symbol_short!("good"))
             };
 
             let reward = cfg

@@ -122,7 +122,7 @@ mod topic_stability_tests {
         let env = Env::default();
         let (admin, _, client) = setup(&env);
 
-        client.set_config(&admin, &symbol_short!("critical"), &20, &200, &1000);
+        client.set_config(&admin, &symbol_short!("critical"), &20, &200, &1000, &200, &150, &100);
 
         let events = env.events().all();
         for i in 0..events.len() {
@@ -182,7 +182,7 @@ mod topic_stability_tests {
             &symbol_short!("critical"),
             &5,
         );
-        client.set_config(&admin, &symbol_short!("critical"), &20, &200, &1000);
+        client.set_config(&admin, &symbol_short!("critical"), &20, &200, &1000, &200, &150, &100);
         client.pause(&admin);
         client.unpause(&admin);
         client.propose_admin(&admin, &new_admin);
