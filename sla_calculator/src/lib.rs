@@ -36,6 +36,7 @@ const STORAGE_VERSION: u32 = 1;
 const RESULT_SCHEMA_VERSION: u32 = 1;
 const MAX_HISTORY_SIZE: u32 = 1000; // SC-062: bounded retention cap
 const RETENTION_LIMIT_KEY: Symbol = symbol_short!("RETLIM"); // SC-013: configurable retention
+const PROPOSAL_EXPIRATION_SECONDS: u64 = 604800; // 7 days in seconds
 
 // -----------------------------------------------------------------------
 // Events
@@ -215,6 +216,15 @@ pub struct PauseInfo {
     pub reason: String,
     pub paused_at: u64, // ledger timestamp (seconds)
     pub paused_by: Address,
+}
+
+/// Pending governance proposal with timestamp for expiration tracking.
+/// Stores the target address and when the proposal was created.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PendingProposalInfo {
+    pub target: Address,
+    pub proposed_at: u64, // ledger timestamp (seconds) when proposal was created
 }
 
 /// SC-021 – Storage version and migration posture for off-chain consumers.
