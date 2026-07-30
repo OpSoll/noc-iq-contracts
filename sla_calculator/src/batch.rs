@@ -170,7 +170,7 @@ fn process_single(
 
     // Validate MTTR
     if req.mttr_minutes == 0 {
-        return Err(SLAError::InvalidThreshold);
+        return Err(SLAError::InvalidMTTR);
     }
 
     // Calculate result

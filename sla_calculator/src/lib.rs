@@ -1,4 +1,6 @@
+
 #![no_std]
+extern crate alloc;
 
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, symbol_short, Address, Env, Map, String,
@@ -108,6 +110,7 @@ pub enum SLAError {
     InvalidRewardAmount = 15,      // SC-W5-046
     InvalidOutageId = 16,          // SC-W5-077
     MalformedSymbolInput = 17,     // SC-W5-077
+    InvalidMTTR = 18,              // SC-W5-471
 }
 
 // -----------------------------------------------------------------------
@@ -134,7 +137,7 @@ pub struct OutageInput {
 /// without any on-chain metadata
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct SlaResult {
+pub struct SlaSimulationResult {
     pub is_breach: bool,
     pub penalty_amount: i128,
     pub uptime_bps: u32,
@@ -753,7 +756,7 @@ impl SLACalculatorContract {
 
         // Emit in numeric order for deterministic consumption
         // All descriptions must be <= 32 bytes (Soroban Symbol constraint)
-        let entries: [(u32, &str, &str); 15] = [
+        let entries: [(u32, &str, &str); 16] = [
             (1, "AlreadyInitialized", "Contract already initialized"),
             (2, "NotInitialized", "Contract not yet initialized"),
             (3, "Unauthorized", "Caller lacks required role"),
@@ -773,6 +776,7 @@ impl SLACalculatorContract {
             (13, "DuplicateOutageInput", "Duplicate outage input"),
             (14, "InvalidPenaltyAmount", "Invalid penalty amount"),
             (15, "InvalidRewardAmount", "Invalid reward amount"),
+            (18, "InvalidMTTR", "MTTR must be greater than zero"),
         ];
 
         for (code, label, description) in entries {
@@ -862,7 +866,7 @@ impl SLACalculatorContract {
     /// # Returns
     /// * `SlaResult` - Contains breach status, penalty amount, uptime basis points, and the
     ///   applied severity tier
-    pub fn simulate_sla(env: Env, outage: OutageInput) -> Result<SlaResult, SLAError> {
+    pub fn simulate_sla(env: Env, outage: OutageInput) -> Result<SlaSimulationResult, SLAError> {
         Self::check_version(&env)?;
         // Validate inputs just like in production calculations
         Self::validate_symbol_input(&outage.outage_id, true)?;
@@ -883,6 +887,9 @@ impl SLACalculatorContract {
         // Graceful degradation: validate inputs before processing
         Self::validate_symbol_input(&outage_id, true)?;
         Self::validate_symbol_input(&severity, false)?;
+        if mttr_minutes == 0 {
+            return Err(SLAError::InvalidMTTR);
+        }
         // We bypass pause and operator checks to allow continuous, public verification
         let cfg = Self::load_config(&env, &severity)?;
         let config_version_hash = Self::compute_config_version_hash(&env)?;
@@ -916,6 +923,9 @@ impl SLACalculatorContract {
         // Graceful degradation: validate inputs before processing
         Self::validate_symbol_input(&outage_id, true)?;
         Self::validate_symbol_input(&severity, false)?;
+        if mttr_minutes == 0 {
+            return Err(SLAError::InvalidMTTR);
+        }
         Self::require_not_paused(&env)?; // #27
         Self::require_operator(&env, &caller)?; // #28
 
@@ -996,7 +1006,7 @@ impl SLACalculatorContract {
     /// (0 in view/audit mode).
     /// Pure core calculation logic used by both calculate_sla and simulate_sla
     /// Extracts the essential SLA computation without any side effects
-    fn compute_sla(env: &Env, config: &SLAConfig, outage: &OutageInput) -> SlaResult {
+    fn compute_sla(env: &Env, config: &SLAConfig, outage: &OutageInput) -> SlaSimulationResult {
         let threshold = config.threshold_minutes;
         let mttr_minutes = outage.mttr_minutes;
         
@@ -1018,7 +1028,7 @@ impl SLACalculatorContract {
         // Map severity to the applied tier
         let applied_tier = Some(outage.severity.clone());
         
-        SlaResult {
+        SlaSimulationResult {
             is_breach,
             penalty_amount,
             uptime_bps,
@@ -1138,7 +1148,7 @@ impl SLACalculatorContract {
     /// fails, allowing graceful degradation instead of panicking.
     fn validate_symbol_input(symbol: &Symbol, is_outage_id: bool) -> Result<(), SLAError> {
         // Convert symbol to string to inspect its content and length
-        let s = symbol.to_string();
+        let s = alloc::string::ToString::to_string(symbol);
         
         // Check length constraints: 0 < length <= 32
         if s.is_empty() || s.len() > 32 {
@@ -1246,10 +1256,10 @@ impl SLACalculatorContract {
                 continue;
             }
             
-            let other_config = existing_configs.get(&other_severity).unwrap();
+            let other_config = existing_configs.get(other_severity).unwrap();
             
             // For any severity that comes before the current one (lower index = higher severity)
-            if i < current_index {
+            if (i as u32) < current_index {
                 // Higher severity should have lower threshold than current
                 if threshold_minutes <= other_config.threshold_minutes {
                     return Err(SLAError::InvalidThreshold);
