@@ -558,6 +558,22 @@ impl SLACalculatorContract {
         Ok(None)
     }
 
+    /// Returns the pending operator address, if any (only returns if proposal is still valid).
+    pub fn get_pending_operator(env: Env) -> Result<Option<Address>, SLAError> {
+        Self::check_version(&env)?;
+        let pending: Option<PendingProposalInfo> = env.storage().instance().get(&PENDING_OP_KEY);
+        if let Some(proposal) = pending {
+            let now = env.ledger().timestamp();
+            if now - proposal.proposed_at <= PROPOSAL_EXPIRATION_SECONDS {
+                return Ok(Some(proposal.target));
+            } else {
+                // Remove expired proposal
+                env.storage().instance().remove(&PENDING_OP_KEY);
+            }
+        }
+        Ok(None)
+    }
+
     // -------------------------------------------------------------------
     // #64 – Two-step operator handoff
     // -------------------------------------------------------------------
