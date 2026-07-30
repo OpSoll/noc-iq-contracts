@@ -17,6 +17,7 @@ pub mod event_correlation;
 mod event_schema;
 pub mod adaptive_tuning;
 pub mod version_negotiation;
+pub mod batch;
 
 // -----------------------------------------------------------------------
 // Storage keys
