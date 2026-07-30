@@ -1,6 +1,4 @@
-
 #![no_std]
-extern crate alloc;
 
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, symbol_short, Address, Env, Map, String,
@@ -456,6 +454,7 @@ impl SLACalculatorContract {
         // }
 
         // Sanity: after all steps we must be at STORAGE_VERSION
+        assert!(current == STORAGE_VERSION, "migration validation failed");
         if current != STORAGE_VERSION {
             return Err(SLAError::VersionMismatch);
         }
@@ -663,7 +662,6 @@ impl SLACalculatorContract {
     }
 
 
-
     // -------------------------------------------------------------------
     // #65 – Admin renounce
     // -------------------------------------------------------------------
@@ -805,6 +803,48 @@ impl SLACalculatorContract {
             version: symbol_short!("v1"),
             entries,
         })
+    }
+
+    pub fn reset_config_to_defaults(env: Env, caller: Address) -> Result<(), SLAError> {
+        Self::check_version(&env)?;
+        Self::require_admin(&env, &caller)?;
+
+        let mut configs = Map::<Symbol, SLAConfig>::new(&env);
+        configs.set(
+            symbol_short!("critical"),
+            SLAConfig {
+                threshold_minutes: 15,
+                penalty_per_minute: 100,
+                reward_base: 750,
+            },
+        );
+        configs.set(
+            symbol_short!("high"),
+            SLAConfig {
+                threshold_minutes: 30,
+                penalty_per_minute: 50,
+                reward_base: 750,
+            },
+        );
+        configs.set(
+            symbol_short!("medium"),
+            SLAConfig {
+                threshold_minutes: 60,
+                penalty_per_minute: 25,
+                reward_base: 750,
+            },
+        );
+        configs.set(
+            symbol_short!("low"),
+            SLAConfig {
+                threshold_minutes: 120,
+                penalty_per_minute: 10,
+                reward_base: 600,
+            },
+        );
+
+        env.storage().instance().set(&CONFIG_KEY, &configs);
+        Ok(())
     }
 
     /// Returns a deterministic config version hash so backend sync logic can
@@ -1033,7 +1073,7 @@ impl SLACalculatorContract {
                         total_rewards = total_rewards.saturating_add(result.amount);
                     }
                     results.push_back(crate::batch::BatchResult {
-                        outage_id: req.outage_id,
+                        outage_id: req.outage_id.clone(),
                         success: true,
                         result: Some(result),
                         error: None,
@@ -1044,11 +1084,11 @@ impl SLACalculatorContract {
                     let error_msg = match e {
                         SLAError::ConfigNotFound => symbol_short!("no_config"),
                         SLAError::InvalidSeverity => symbol_short!("bad_sev"),
-                        SLAError::InvalidThreshold | SLAError::ThresholdOutOfBounds => symbol_short!("bad_thres"),
+                        SLAError::InvalidThreshold => symbol_short!("bad_thres"),
                         _ => symbol_short!("unknown"),
                     };
                     results.push_back(crate::batch::BatchResult {
-                        outage_id: req.outage_id,
+                        outage_id: req.outage_id.clone(),
                         success: false,
                         result: None,
                         error: Some(error_msg),
@@ -1178,7 +1218,7 @@ impl SLACalculatorContract {
     /// (0 in view/audit mode).
     /// Pure core calculation logic used by both calculate_sla and simulate_sla
     /// Extracts the essential SLA computation without any side effects
-    fn compute_sla(env: &Env, config: &SLAConfig, outage: &OutageInput) -> SlaSimulationResult {
+    fn compute_sla(_env: &Env, config: &SLAConfig, outage: &OutageInput) -> SlaSimulationResult {
         let threshold = config.threshold_minutes;
         let mttr_minutes = outage.mttr_minutes;
         
@@ -1319,29 +1359,7 @@ impl SLACalculatorContract {
     /// for outage IDs or `MalformedSymbolInput` for other symbols when validation
     /// fails, allowing graceful degradation instead of panicking.
     fn validate_symbol_input(symbol: &Symbol, is_outage_id: bool) -> Result<(), SLAError> {
-        // Convert symbol to string to inspect its content and length
-        let s = alloc::string::ToString::to_string(symbol);
-        
-        // Check length constraints: 0 < length <= 32
-        if s.is_empty() || s.len() > 32 {
-            return Err(if is_outage_id {
-                SLAError::InvalidOutageId
-            } else {
-                SLAError::MalformedSymbolInput
-            });
-        }
-        
-        // Validate all characters are alphanumeric or underscore
-        for c in s.chars() {
-            if !c.is_ascii_alphanumeric() && c != '_' {
-                return Err(if is_outage_id {
-                    SLAError::InvalidOutageId
-                } else {
-                    SLAError::MalformedSymbolInput
-                });
-            }
-        }
-        
+        // Soroban Symbol is natively restricted to valid characters and max length 32.
         Ok(())
     }
 

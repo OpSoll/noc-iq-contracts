@@ -1,3 +1,4 @@
+
 use soroban_sdk::{symbol_short, Env, Symbol};
 
 use crate::{SLAResult, SLAError, SLAConfig, OPERATOR_KEY, CONFIG_KEY};
@@ -109,7 +110,7 @@ pub fn batch_calculate(
                     total_rewards = total_rewards.saturating_add(result.amount);
                 }
                 results.push_back(BatchResult {
-                    outage_id: req.outage_id,
+                    outage_id: req.outage_id.clone(),
                     success: true,
                     result: Some(result),
                     error: None,
@@ -120,11 +121,11 @@ pub fn batch_calculate(
                 let error_msg = match e {
                     SLAError::ConfigNotFound => symbol_short!("no_config"),
                     SLAError::InvalidSeverity => symbol_short!("bad_sev"),
-                    SLAError::InvalidThreshold | SLAError::ThresholdOutOfBounds => symbol_short!("bad_thres"),
+                    SLAError::InvalidThreshold => symbol_short!("bad_thres"),
                     _ => symbol_short!("unknown"),
                 };
                 results.push_back(BatchResult {
-                    outage_id: req.outage_id,
+                    outage_id: req.outage_id.clone(),
                     success: false,
                     result: None,
                     error: Some(error_msg),
@@ -145,7 +146,7 @@ pub fn batch_calculate(
 }
 
 /// Process a single batch item (view-only, no persistence).
-pub fn process_single(
+pub(crate) fn process_single(
     env: &Env,
     configs: &soroban_sdk::Map<Symbol, SLAConfig>,
     req: &BatchRequest,
