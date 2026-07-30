@@ -486,25 +486,38 @@ impl SLACalculatorContract {
     // -------------------------------------------------------------------
 
     /// Propose a new admin. The current admin initiates; the new admin must call `accept_admin`.
+    /// Proposals expire after 7 days.
     pub fn propose_admin(env: Env, caller: Address, new_admin: Address) -> Result<(), SLAError> {
         Self::check_version(&env)?;
         Self::require_admin(&env, &caller)?;
-        env.storage().instance().set(&PENDING_ADMIN_KEY, &new_admin);
+        let proposal = PendingProposalInfo {
+            target: new_admin.clone(),
+            proposed_at: env.ledger().timestamp(),
+        };
+        env.storage().instance().set(&PENDING_ADMIN_KEY, &proposal);
         env.events()
             .publish((EVENT_ADMIN_PROP, EVENT_VERSION, caller), (new_admin,));
         Ok(())
     }
 
     /// Accept a pending admin transfer. Must be called by the proposed new admin.
-    /// On success the caller becomes admin and the pending proposal is cleared.
+    /// Proposals expire after 7 days.
     pub fn accept_admin(env: Env, caller: Address) -> Result<(), SLAError> {
         Self::check_version(&env)?;
-        let pending: Address = env
+        let pending: PendingProposalInfo = env
             .storage()
             .instance()
             .get(&PENDING_ADMIN_KEY)
             .ok_or(SLAError::NoPendingTransfer)?;
-        if caller != pending {
+            
+        // Check if proposal has expired
+        let now = env.ledger().timestamp();
+        if now - pending.proposed_at > PROPOSAL_EXPIRATION_SECONDS {
+            env.storage().instance().remove(&PENDING_ADMIN_KEY);
+            return Err(SLAError::NoPendingTransfer);
+        }
+        
+        if caller != pending.target {
             return Err(SLAError::Unauthorized);
         }
         env.storage().instance().set(&ADMIN_KEY, &caller);
