@@ -771,6 +771,82 @@ fn test_backend_parity_reward_tier_cases() {
 }
 
 // ============================================================
+// #489 – Safe math overflow protection
+// ============================================================
+
+#[test]
+fn test_reward_overflow_rejected() {
+    let (env, client, actors) = setup();
+
+    // Set reward_base to an extremely high value that would overflow when multiplied by 200 (top tier)
+    // i128::MAX / 200 ≈ 1.7e36, so setting reward_base higher should overflow
+    // Use a value that's safely below max but high enough
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("critical"),
+        &15,
+        &100,
+        &i128::MAX,
+    );
+
+    // With reward_base = i128::MAX and multiplier = 200, checked_mul will overflow
+    let result = client.try_calculate_sla(
+        &actors.operator,
+        &symbol_short!("OVF001"),
+        &symbol_short!("critical"),
+        &5,
+    );
+    assert!(result.is_err(), "Reward calculation overflow must be rejected");
+}
+
+#[test]
+fn test_penalty_overflow_rejected() {
+    let (env, client, actors) = setup();
+
+    // Set penalty_per_minute to a very high value
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("critical"),
+        &15,
+        &i128::MAX,
+        &750,
+    );
+
+    // With high penalty and overtime, mul will overflow
+    let result = client.try_calculate_sla(
+        &actors.operator,
+        &symbol_short!("OVF002"),
+        &symbol_short!("critical"),
+        &20, // 5 min overtime * i128::MAX → overflow
+    );
+    assert!(result.is_err(), "Penalty calculation overflow must be rejected");
+}
+
+#[test]
+fn test_high_but_safe_reward_passes() {
+    let (_env, client, actors) = setup();
+
+    // Set reward_base to a high but safe value
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("critical"),
+        &15,
+        &100,
+        &500_000_000_000_000_000i128, // 5e17, well within safe range for checked_mul
+    );
+
+    // With multiplier=200: 5e17 * 200 = 1e20, safe for i128
+    let result = client.calculate_sla(
+        &actors.operator,
+        &symbol_short!("SAFE001"),
+        &symbol_short!("critical"),
+        &5,
+    );
+    assert_eq!(result.status, symbol_short!("met"), "Safe reward calculation must succeed");
+    assert!(result.amount > 0, "Reward amount must be positive");
+}
+
+// ============================================================
 // Budget / performance
 // ============================================================
 
