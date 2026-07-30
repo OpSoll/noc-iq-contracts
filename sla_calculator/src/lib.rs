@@ -542,10 +542,20 @@ impl SLACalculatorContract {
         Ok(())
     }
 
-    /// Returns the pending admin address, if any.
+    /// Returns the pending admin address, if any (only returns if proposal is still valid).
     pub fn get_pending_admin(env: Env) -> Result<Option<Address>, SLAError> {
         Self::check_version(&env)?;
-        Ok(env.storage().instance().get(&PENDING_ADMIN_KEY))
+        let pending: Option<PendingProposalInfo> = env.storage().instance().get(&PENDING_ADMIN_KEY);
+        if let Some(proposal) = pending {
+            let now = env.ledger().timestamp();
+            if now - proposal.proposed_at <= PROPOSAL_EXPIRATION_SECONDS {
+                return Ok(Some(proposal.target));
+            } else {
+                // Remove expired proposal
+                env.storage().instance().remove(&PENDING_ADMIN_KEY);
+            }
+        }
+        Ok(None)
     }
 
     // -------------------------------------------------------------------
@@ -553,6 +563,7 @@ impl SLACalculatorContract {
     // -------------------------------------------------------------------
 
     /// Propose a new operator. The current admin initiates; the new operator must call `accept_operator`.
+    /// Proposals expire after 7 days.
     pub fn propose_operator(
         env: Env,
         caller: Address,
@@ -560,21 +571,34 @@ impl SLACalculatorContract {
     ) -> Result<(), SLAError> {
         Self::check_version(&env)?;
         Self::require_admin(&env, &caller)?;
-        env.storage().instance().set(&PENDING_OP_KEY, &new_operator);
+        let proposal = PendingProposalInfo {
+            target: new_operator.clone(),
+            proposed_at: env.ledger().timestamp(),
+        };
+        env.storage().instance().set(&PENDING_OP_KEY, &proposal);
         env.events()
             .publish((EVENT_OP_PROP, EVENT_VERSION, caller), (new_operator,));
         Ok(())
     }
 
     /// Accept a pending operator handoff. Must be called by the proposed new operator.
+    /// Proposals expire after 7 days.
     pub fn accept_operator(env: Env, caller: Address) -> Result<(), SLAError> {
         Self::check_version(&env)?;
-        let pending: Address = env
+        let pending: PendingProposalInfo = env
             .storage()
             .instance()
             .get(&PENDING_OP_KEY)
             .ok_or(SLAError::NoPendingTransfer)?;
-        if caller != pending {
+            
+        // Check if proposal has expired
+        let now = env.ledger().timestamp();
+        if now - pending.proposed_at > PROPOSAL_EXPIRATION_SECONDS {
+            env.storage().instance().remove(&PENDING_OP_KEY);
+            return Err(SLAError::NoPendingTransfer);
+        }
+        
+        if caller != pending.target {
             return Err(SLAError::Unauthorized);
         }
         env.storage().instance().set(&OPERATOR_KEY, &caller);
