@@ -43,7 +43,7 @@ jobs:
 
       - name: Generate SHA-256 manifest
         run: |
-          WASM=sla_calculator/target/wasm32-unknown-unknown/release/sla_calculator.wasm
+          WASM=target/wasm32-unknown-unknown/release/sla_calculator.wasm
           sha256sum "$WASM" | awk '{print $1 "  sla_calculator.wasm"}' > manifest.sha256
           echo "=== manifest.sha256 ==="
           cat manifest.sha256
@@ -53,7 +53,7 @@ jobs:
       - name: Verify manifest is self-consistent
         run: |
           # Copy the WASM next to the manifest and verify
-          cp sla_calculator/target/wasm32-unknown-unknown/release/sla_calculator.wasm .
+          cp target/wasm32-unknown-unknown/release/sla_calculator.wasm .
           sha256sum -c manifest.sha256
           rm sla_calculator.wasm
 
@@ -63,7 +63,7 @@ jobs:
           name: release-hash-manifest
           path: |
             manifest.sha256
-            sla_calculator/target/wasm32-unknown-unknown/release/sla_calculator.wasm
+            target/wasm32-unknown-unknown/release/sla_calculator.wasm
           retention-days: 90
 
       # Attach manifest to GitHub Release when triggered by a version tag
@@ -73,4 +73,4 @@ jobs:
         with:
           files: |
             manifest.sha256
-            sla_calculator/target/wasm32-unknown-unknown/release/sla_calculator.wasm
+            target/wasm32-unknown-unknown/release/sla_calculator.wasm
