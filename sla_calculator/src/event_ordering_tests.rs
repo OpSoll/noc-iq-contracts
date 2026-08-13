@@ -63,7 +63,7 @@ mod event_ordering_tests {
         let env = Env::default();
         let (admin, operator, client) = setup(&env);
 
-        client.set_config(&admin, &symbol_short!("critical"), &20, &200, &1000);
+        client.set_config(&admin, &symbol_short!("critical"), &20, &200, &1000, &200, &150, &100);
         client.calculate_sla(
             &operator,
             &symbol_short!("ORD001"),
@@ -230,14 +230,14 @@ mod event_ordering_tests {
         let (admin, operator, client) = setup(&env);
 
         // Mix of operations
-        client.set_config(&admin, &symbol_short!("low"), &240, &15, &900);
+        client.set_config(&admin, &symbol_short!("low"), &240, &15, &900, &200, &150, &100);
         client.calculate_sla(
             &operator,
             &symbol_short!("MIX_A"),
             &symbol_short!("low"),
             &100,
         );
-        client.set_config(&admin, &symbol_short!("critical"), &25, &150, &850);
+        client.set_config(&admin, &symbol_short!("critical"), &25, &150, &850, &200, &150, &100);
         client.calculate_sla(
             &operator,
             &symbol_short!("MIX_B"),

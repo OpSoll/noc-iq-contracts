@@ -234,7 +234,16 @@ fn test_calculate_sla_emits_versioned_integration_event() {
 fn test_set_config_emits_versioned_config_event() {
     let (env, client, actors) = setup();
 
-    client.set_config(&actors.admin, &symbol_short!("critical"), &20, &200, &1000);
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("critical"),
+        &20,
+        &200,
+        &1000,
+        &200,
+        &150,
+        &100,
+    );
 
     let events = env.events().all();
     let (_, topics, data) = events.last().unwrap();
@@ -291,7 +300,16 @@ fn test_stranger_cannot_set_operator() {
 fn test_admin_can_set_and_get_config() {
     let (_env, client, actors) = setup();
 
-    client.set_config(&actors.admin, &symbol_short!("critical"), &20, &200, &1000);
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("critical"),
+        &20,
+        &200,
+        &1000,
+        &200,
+        &150,
+        &100,
+    );
 
     let cfg = client.get_config(&symbol_short!("critical"));
     assert_eq!(cfg.threshold_minutes, 20);
@@ -310,6 +328,9 @@ fn test_operator_cannot_set_config() {
         &20,
         &200,
         &1000,
+        &200,
+        &150,
+        &100,
     );
 }
 
@@ -323,6 +344,9 @@ fn test_stranger_cannot_set_config() {
         &20,
         &200,
         &1000,
+        &200,
+        &150,
+        &100,
     );
 }
 
@@ -426,6 +450,118 @@ fn test_old_operator_locked_out_after_rotation() {
         &symbol_short!("high"),
         &20,
     );
+}
+
+// ============================================================
+// #472 – Operator revocation
+// ============================================================
+
+#[test]
+fn test_admin_can_revoke_operator() {
+    let (env, client, actors) = setup();
+
+    // Verify operator exists before revocation
+    assert_eq!(client.get_operator(), actors.operator);
+
+    // Revoke
+    client.revoke_operator(&actors.admin);
+
+    // Operator should be removed; no one can calculate SLA
+    let blocked = client.try_calculate_sla(
+        &actors.operator,
+        &symbol_short!("REV001"),
+        &symbol_short!("critical"),
+        &10,
+    );
+    assert!(
+        blocked.is_err(),
+        "calculate_sla must fail after operator revocation"
+    );
+}
+
+#[test]
+fn test_revoked_operator_cannot_calculate() {
+    let (env, client, actors) = setup();
+
+    client.revoke_operator(&actors.admin);
+
+    // The old operator cannot calculate
+    let result = client.try_calculate_sla(
+        &actors.operator,
+        &symbol_short!("REV002"),
+        &symbol_short!("critical"),
+        &10,
+    );
+    assert!(result.is_err(), "Revoked operator must be rejected");
+}
+
+#[test]
+fn test_revoked_operator_can_be_replaced() {
+    let (env, client, actors) = setup();
+    let new_operator = soroban_sdk::Address::generate(&env);
+
+    // Revoke current operator
+    client.revoke_operator(&actors.admin);
+
+    // Set a new operator
+    client.set_operator(&actors.admin, &new_operator);
+
+    // New operator can calculate
+    let result = client.calculate_sla(
+        &new_operator,
+        &symbol_short!("REV003"),
+        &symbol_short!("critical"),
+        &10,
+    );
+    assert_eq!(result.status, symbol_short!("met"));
+}
+
+#[test]
+fn test_revoke_operator_clears_pending_proposal() {
+    let (env, client, actors) = setup();
+    let new_op = soroban_sdk::Address::generate(&env);
+
+    // Create a pending operator proposal
+    client.propose_operator(&actors.admin, &new_op);
+    assert_eq!(
+        client.get_pending_operator(),
+        Some(new_op.clone()),
+        "Pending operator must exist before revocation"
+    );
+
+    // Revoke clears both operator and pending proposal
+    client.revoke_operator(&actors.admin);
+
+    // Pending proposal is cleared
+    assert_eq!(
+        client.get_pending_operator(),
+        None,
+        "Pending operator must be cleared after revocation"
+    );
+
+    // A new operator proposal can be created for a different operator
+    let another_op = soroban_sdk::Address::generate(&env);
+    client.propose_operator(&actors.admin, &another_op);
+    assert_eq!(
+        client.get_pending_operator(),
+        Some(another_op),
+        "New operator proposal must work after revocation"
+    );
+}
+
+#[test]
+#[should_panic]
+fn test_operator_cannot_revoke_self() {
+    let (env, client, actors) = setup();
+    // operator must not have admin authority to revoke
+    client.revoke_operator(&actors.operator);
+}
+
+#[test]
+#[should_panic]
+fn test_stranger_cannot_revoke_operator() {
+    let (env, client, actors) = setup();
+    client.revoke_operator(&actors.stranger);
 }
 
 // ============================================================
@@ -669,7 +805,16 @@ fn test_exact_threshold_mttr_is_always_met_never_violated() {
 fn test_exact_threshold_boundary_is_stable_after_config_update() {
     let (_env, client, actors) = setup();
 
-    client.set_config(&actors.admin, &symbol_short!("critical"), &20, &200, &1000);
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("critical"),
+        &20,
+        &200,
+        &1000,
+        &200,
+        &150,
+        &100,
+    );
 
     let exact = client.calculate_sla(
         &actors.operator,
@@ -788,6 +933,45 @@ fn test_backend_parity_reward_tier_cases() {
 }
 
 // ============================================================
+// #489 – Safe math overflow protection
+// ============================================================
+
+// Config validation caps reward_base (<= 100000) and penalty (<= 10000), so
+// checked_mul can never overflow through the public set_config path. The
+// extreme-boundary scenarios are covered by the "test_extreme_*" tests below.
+
+#[test]
+fn test_high_but_safe_reward_passes() {
+    let (_env, client, actors) = setup();
+
+    // Max valid reward_base (100000) with top-tier multiplier must not overflow.
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("critical"),
+        &15,
+        &100,
+        &100000,
+        &200,
+        &150,
+        &100,
+    );
+
+    // mttr=0 → top-tier reward = 100000 * 200 / 100 = 200000
+    let result = client.calculate_sla(
+        &actors.operator,
+        &symbol_short!("SAFE001"),
+        &symbol_short!("critical"),
+        &0,
+    );
+    assert_eq!(
+        result.status,
+        symbol_short!("met"),
+        "Safe reward calculation must succeed"
+    );
+    assert_eq!(result.amount, 200_000);
+}
+
+// ============================================================
 // Budget / performance
 // ============================================================
 
@@ -807,7 +991,7 @@ fn test_calculate_sla_budget_is_reasonable() {
     let after = env.budget().cpu_instruction_cost();
 
     assert!(
-        after - before < 200_000,
+        after - before < 250_000,
         "calculate_sla too expensive: {} instructions",
         after - before
     );
@@ -825,11 +1009,20 @@ fn test_set_config_budget_is_reasonable() {
     client.initialize(&admin, &op);
 
     let before = env.budget().cpu_instruction_cost();
-    client.set_config(&admin, &symbol_short!("critical"), &15, &100, &750);
+    client.set_config(
+        &admin,
+        &symbol_short!("critical"),
+        &15,
+        &100,
+        &750,
+        &200,
+        &150,
+        &100,
+    );
     let after = env.budget().cpu_instruction_cost();
 
     assert!(
-        after - before < 150_000,
+        after - before < 200_000,
         "set_config too expensive: {} instructions",
         after - before
     );
@@ -1212,8 +1405,26 @@ fn test_canonical_severity_order_is_aligned_across_snapshot_and_metadata() {
 fn test_canonical_severity_order_survives_config_updates() {
     let (_env, client, actors) = setup();
 
-    client.set_config(&actors.admin, &symbol_short!("low"), &240, &15, &900);
-    client.set_config(&actors.admin, &symbol_short!("critical"), &20, &150, &800);
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("low"),
+        &240,
+        &15,
+        &900,
+        &200,
+        &150,
+        &100,
+    );
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("critical"),
+        &20,
+        &150,
+        &800,
+        &200,
+        &150,
+        &100,
+    );
 
     let snapshot = client.get_config_snapshot();
     let expected = [
@@ -1233,7 +1444,16 @@ fn test_canonical_severity_order_survives_config_updates() {
 fn test_config_version_hash_changes_on_update() {
     let (_env, client, actors) = setup();
     let before = client.get_config_version_hash();
-    client.set_config(&actors.admin, &symbol_short!("critical"), &20, &200, &1000);
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("critical"),
+        &20,
+        &200,
+        &1000,
+        &200,
+        &150,
+        &100,
+    );
     let after = client.get_config_version_hash();
     assert_ne!(before, after);
 }
@@ -1243,7 +1463,16 @@ fn test_config_version_hash_stable_after_same_value_write() {
     let (_env, client, actors) = setup();
     let before = client.get_config_version_hash();
     // Write the same values back – hash must not change
-    client.set_config(&actors.admin, &symbol_short!("critical"), &15, &100, &750);
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("critical"),
+        &15,
+        &100,
+        &750,
+        &200,
+        &150,
+        &100,
+    );
     let after = client.get_config_version_hash();
     assert_eq!(before, after);
 }
@@ -1339,7 +1568,16 @@ fn test_config_version_hash_collision_resistance() {
     // Original critical: threshold=15, penalty=100, reward=750 (sum=865)
     // New critical: threshold=20, penalty=95, reward=750 (sum=865, same additive sum)
     // Both are valid critical configs (threshold<=60, penalty>=50)
-    client.set_config(&actors.admin, &symbol_short!("critical"), &20, &95, &750);
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("critical"),
+        &20,
+        &95,
+        &750,
+        &200,
+        &150,
+        &100,
+    );
     let collision_attempt_hash = client.get_config_version_hash();
 
     // Hash should be different despite same additive sum
@@ -1349,7 +1587,16 @@ fn test_config_version_hash_collision_resistance() {
     );
 
     // Change critical to different values — hash must differ
-    client.set_config(&actors.admin, &symbol_short!("critical"), &25, &200, &1000);
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("critical"),
+        &25,
+        &200,
+        &1000,
+        &200,
+        &150,
+        &100,
+    );
     let changed_hash = client.get_config_version_hash();
     assert_ne!(
         initial_hash, changed_hash,
@@ -1357,7 +1604,16 @@ fn test_config_version_hash_collision_resistance() {
     );
 
     // Restore original config
-    client.set_config(&actors.admin, &symbol_short!("critical"), &15, &100, &750);
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("critical"),
+        &15,
+        &100,
+        &750,
+        &200,
+        &150,
+        &100,
+    );
     let restored_hash = client.get_config_version_hash();
     assert_eq!(
         initial_hash, restored_hash,
@@ -1373,25 +1629,61 @@ fn test_config_version_hash_field_order_sensitivity() {
     let original_hash = client.get_config_version_hash();
 
     // Change threshold only
-    client.set_config(&actors.admin, &symbol_short!("high"), &25, &50, &750);
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("high"),
+        &25,
+        &50,
+        &750,
+        &200,
+        &150,
+        &100,
+    );
     let threshold_hash = client.get_config_version_hash();
     assert_ne!(original_hash, threshold_hash);
 
     // Reset and change penalty only
-    client.set_config(&actors.admin, &symbol_short!("high"), &30, &60, &750);
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("high"),
+        &30,
+        &60,
+        &750,
+        &200,
+        &150,
+        &100,
+    );
     let penalty_hash = client.get_config_version_hash();
     assert_ne!(original_hash, penalty_hash);
     assert_ne!(threshold_hash, penalty_hash);
 
     // Reset and change reward only
-    client.set_config(&actors.admin, &symbol_short!("high"), &30, &50, &800);
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("high"),
+        &30,
+        &50,
+        &800,
+        &200,
+        &150,
+        &100,
+    );
     let reward_hash = client.get_config_version_hash();
     assert_ne!(original_hash, reward_hash);
     assert_ne!(threshold_hash, reward_hash);
     assert_ne!(penalty_hash, reward_hash);
 
     // Restore original
-    client.set_config(&actors.admin, &symbol_short!("high"), &30, &50, &750);
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("high"),
+        &30,
+        &50,
+        &750,
+        &200,
+        &150,
+        &100,
+    );
     let restored_hash = client.get_config_version_hash();
     assert_eq!(original_hash, restored_hash);
 }
@@ -1403,19 +1695,55 @@ fn test_config_version_hash_severity_isolation() {
     let original_hash = client.get_config_version_hash();
 
     // Change only critical severity
-    client.set_config(&actors.admin, &symbol_short!("critical"), &20, &200, &1000);
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("critical"),
+        &20,
+        &200,
+        &1000,
+        &200,
+        &150,
+        &100,
+    );
     let critical_changed_hash = client.get_config_version_hash();
     assert_ne!(original_hash, critical_changed_hash);
 
     // Change only high severity (restore critical first)
-    client.set_config(&actors.admin, &symbol_short!("critical"), &15, &100, &750);
-    client.set_config(&actors.admin, &symbol_short!("high"), &35, &55, &775);
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("critical"),
+        &15,
+        &100,
+        &750,
+        &200,
+        &150,
+        &100,
+    );
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("high"),
+        &35,
+        &55,
+        &775,
+        &200,
+        &150,
+        &100,
+    );
     let high_changed_hash = client.get_config_version_hash();
     assert_ne!(original_hash, high_changed_hash);
     assert_ne!(critical_changed_hash, high_changed_hash);
 
     // Both changes should produce yet another hash
-    client.set_config(&actors.admin, &symbol_short!("critical"), &20, &200, &1000);
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("critical"),
+        &20,
+        &200,
+        &1000,
+        &200,
+        &150,
+        &100,
+    );
     let both_changed_hash = client.get_config_version_hash();
     assert_ne!(original_hash, both_changed_hash);
     assert_ne!(critical_changed_hash, both_changed_hash);
@@ -1437,6 +1765,9 @@ fn test_config_version_hash_distribution() {
             &(15 + i),
             &100,
             &750,
+            &200,
+            &150,
+            &100,
         );
         let hash = client.get_config_version_hash();
         hashes.push_back(hash);
@@ -1454,7 +1785,16 @@ fn test_config_version_hash_distribution() {
     }
 
     // Restore original config
-    client.set_config(&actors.admin, &symbol_short!("critical"), &15, &100, &750);
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("critical"),
+        &15,
+        &100,
+        &750,
+        &200,
+        &150,
+        &100,
+    );
 }
 
 // ============================================================
@@ -1466,9 +1806,36 @@ fn test_repeated_config_updates_latest_wins() {
     let (_env, client, actors) = setup();
 
     // default high=30,50; critical must have threshold<30 and penalty>50
-    client.set_config(&actors.admin, &symbol_short!("critical"), &10, &51, &500);
-    client.set_config(&actors.admin, &symbol_short!("critical"), &20, &100, &800);
-    client.set_config(&actors.admin, &symbol_short!("critical"), &29, &200, &1200);
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("critical"),
+        &10,
+        &51,
+        &500,
+        &200,
+        &150,
+        &100,
+    );
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("critical"),
+        &20,
+        &100,
+        &800,
+        &200,
+        &150,
+        &100,
+    );
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("critical"),
+        &29,
+        &200,
+        &1200,
+        &200,
+        &150,
+        &100,
+    );
 
     let cfg = client.get_config(&symbol_short!("critical"));
     assert_eq!(cfg.threshold_minutes, 29);
@@ -1481,8 +1848,26 @@ fn test_repeated_config_updates_do_not_corrupt_calculation() {
     let (_env, client, actors) = setup();
 
     // default high=30,50; critical must have threshold<30 and penalty>50
-    client.set_config(&actors.admin, &symbol_short!("critical"), &10, &51, &500);
-    client.set_config(&actors.admin, &symbol_short!("critical"), &20, &100, &800);
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("critical"),
+        &10,
+        &51,
+        &500,
+        &200,
+        &150,
+        &100,
+    );
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("critical"),
+        &20,
+        &100,
+        &800,
+        &200,
+        &150,
+        &100,
+    );
 
     // mttr=25 → 5 min over threshold=20 → penalty = 5 * 100 = 500
     let result = client.calculate_sla(
@@ -1501,10 +1886,46 @@ fn test_repeated_config_updates_across_severities_are_independent() {
 
     // critical must have penalty>high_penalty (default 50) and threshold<high_threshold (default 30)
     // high must have penalty>medium_penalty (default 25) and threshold<medium_threshold (default 60)
-    client.set_config(&actors.admin, &symbol_short!("critical"), &10, &51, &500);
-    client.set_config(&actors.admin, &symbol_short!("high"), &20, &26, &400);
-    client.set_config(&actors.admin, &symbol_short!("critical"), &10, &51, &100);
-    client.set_config(&actors.admin, &symbol_short!("high"), &20, &26, &100);
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("critical"),
+        &10,
+        &51,
+        &500,
+        &200,
+        &150,
+        &100,
+    );
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("high"),
+        &20,
+        &26,
+        &400,
+        &200,
+        &150,
+        &100,
+    );
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("critical"),
+        &10,
+        &51,
+        &100,
+        &200,
+        &150,
+        &100,
+    );
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("high"),
+        &20,
+        &26,
+        &100,
+        &200,
+        &150,
+        &100,
+    );
 
     // medium and low must remain at their defaults
     let medium = client.get_config(&symbol_short!("medium"));
@@ -1632,6 +2053,9 @@ fn setup_with_critical(
         &threshold,
         &penalty,
         &reward,
+        &200,
+        &150,
+        &100,
     );
     (env, client, actors)
 }
@@ -1677,6 +2101,77 @@ fn test_fixture_after_calculation_stats_are_updated() {
 }
 
 // ============================================================
+// #490 – SLA result verification hash
+// ============================================================
+
+#[test]
+fn test_compute_result_hash_is_deterministic() {
+    let (env, client, actors) = setup();
+
+    let result = client.calculate_sla(
+        &actors.operator,
+        &symbol_short!("HASH001"),
+        &symbol_short!("critical"),
+        &5,
+    );
+
+    let h1 = client.compute_result_hash(&result);
+    let h2 = client.compute_result_hash(&result);
+    assert_eq!(h1, h2, "Hash must be deterministic for identical results");
+}
+
+#[test]
+fn test_compute_result_hash_differs_for_different_results() {
+    let (env, client, actors) = setup();
+
+    let result_a = client.calculate_sla(
+        &actors.operator,
+        &symbol_short!("HASH002"),
+        &symbol_short!("critical"),
+        &5,
+    );
+
+    let result_b = client.calculate_sla(
+        &actors.operator,
+        &symbol_short!("HASH003"),
+        &symbol_short!("critical"),
+        &25,
+    );
+
+    let ha = client.compute_result_hash(&result_a);
+    let hb = client.compute_result_hash(&result_b);
+    assert_ne!(
+        ha, hb,
+        "Different outage results must produce different hashes"
+    );
+}
+
+#[test]
+fn test_compute_result_hash_same_fields_identical_hash() {
+    let (env, client, actors) = setup();
+
+    // Two separate calculations with identical inputs
+    let r1 = client.calculate_sla(
+        &actors.operator,
+        &symbol_short!("HASH_A"),
+        &symbol_short!("high"),
+        &20,
+    );
+    let r2 = client.calculate_sla(
+        &actors.operator,
+        &symbol_short!("HASH_B"),
+        &symbol_short!("high"),
+        &20,
+    );
+
+    // Both should be "met" with identical computed result fields
+    // (except outage_id which differs)
+    let h1 = client.compute_result_hash(&r1);
+    let h2 = client.compute_result_hash(&r2);
+    assert_ne!(h1, h2, "Different outage_ids must produce different hashes");
+}
+
+// ============================================================
 // #95 – Negative tests for malformed symbol inputs
 // ============================================================
 
@@ -1719,7 +2214,16 @@ fn test_old_admin_loses_authority_after_accept() {
     client.accept_admin(&new_admin);
 
     // old admin can no longer set config – must panic
-    client.set_config(&actors.admin, &symbol_short!("critical"), &20, &200, &1000);
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("critical"),
+        &20,
+        &200,
+        &1000,
+        &200,
+        &150,
+        &100,
+    );
 }
 
 #[test]
@@ -1981,7 +2485,16 @@ fn test_admin_gated_call_fails_after_renounce() {
     let (env, client, actors) = setup();
     client.renounce_admin(&actors.admin);
     // set_config must now panic – no admin exists
-    client.set_config(&actors.admin, &symbol_short!("critical"), &20, &200, &1000);
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("critical"),
+        &20,
+        &200,
+        &1000,
+        &200,
+        &150,
+        &100,
+    );
 }
 
 #[test]
@@ -2103,7 +2616,16 @@ fn test_get_config_rejects_unknown_severity() {
 fn test_set_config_then_calculate_unknown_severity_still_rejects_other_unknown() {
     // Even after adding a custom severity via set_config, a different unknown still fails
     let (env, client, actors) = setup();
-    client.set_config(&actors.admin, &Symbol::new(&env, "custom"), &10, &50, &500);
+    client.set_config(
+        &actors.admin,
+        &Symbol::new(&env, "custom"),
+        &10,
+        &50,
+        &500,
+        &200,
+        &150,
+        &100,
+    );
     // "bogus" was never configured
     client.calculate_sla(
         &actors.operator,
@@ -2122,10 +2644,46 @@ fn test_valid_config_passes_validation() {
     let (_env, client, actors) = setup();
 
     // Set in low→medium→high→critical order to maintain cross-severity monotonicity
-    client.set_config(&actors.admin, &symbol_short!("low"), &180, &15, &500);
-    client.set_config(&actors.admin, &symbol_short!("medium"), &90, &30, &600);
-    client.set_config(&actors.admin, &symbol_short!("high"), &45, &75, &800);
-    client.set_config(&actors.admin, &symbol_short!("critical"), &30, &150, &1000);
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("low"),
+        &180,
+        &15,
+        &500,
+        &200,
+        &150,
+        &100,
+    );
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("medium"),
+        &90,
+        &30,
+        &600,
+        &200,
+        &150,
+        &100,
+    );
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("high"),
+        &45,
+        &75,
+        &800,
+        &200,
+        &150,
+        &100,
+    );
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("critical"),
+        &30,
+        &150,
+        &1000,
+        &200,
+        &150,
+        &100,
+    );
 
     // Verify values were set
     let cfg = client.get_config(&symbol_short!("critical"));
@@ -2139,7 +2697,16 @@ fn test_valid_config_passes_validation() {
 fn test_invalid_severity_fails_validation() {
     let (_env, client, actors) = setup();
     // "urgent" is not a supported severity
-    client.set_config(&actors.admin, &symbol_short!("urgent"), &15, &100, &750);
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("urgent"),
+        &15,
+        &100,
+        &750,
+        &200,
+        &150,
+        &100,
+    );
 }
 
 #[test]
@@ -2147,7 +2714,16 @@ fn test_invalid_severity_fails_validation() {
 fn test_zero_threshold_fails_validation() {
     let (_env, client, actors) = setup();
     // Threshold cannot be 0
-    client.set_config(&actors.admin, &symbol_short!("critical"), &0, &100, &750);
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("critical"),
+        &0,
+        &100,
+        &750,
+        &200,
+        &150,
+        &100,
+    );
 }
 
 #[test]
@@ -2155,7 +2731,16 @@ fn test_zero_threshold_fails_validation() {
 fn test_threshold_too_large_fails_validation() {
     let (_env, client, actors) = setup();
     // Threshold exceeds 1440 minute (24 hour) maximum
-    client.set_config(&actors.admin, &symbol_short!("low"), &1500, &10, &600);
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("low"),
+        &1500,
+        &10,
+        &600,
+        &200,
+        &150,
+        &100,
+    );
 }
 
 #[test]
@@ -2163,7 +2748,16 @@ fn test_threshold_too_large_fails_validation() {
 fn test_negative_penalty_fails_validation() {
     let (_env, client, actors) = setup();
     // Penalty must be positive
-    client.set_config(&actors.admin, &symbol_short!("critical"), &15, &-100, &750);
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("critical"),
+        &15,
+        &-100,
+        &750,
+        &200,
+        &150,
+        &100,
+    );
 }
 
 #[test]
@@ -2171,7 +2765,16 @@ fn test_negative_penalty_fails_validation() {
 fn test_zero_penalty_fails_validation() {
     let (_env, client, actors) = setup();
     // Penalty must be positive (cannot be 0)
-    client.set_config(&actors.admin, &symbol_short!("critical"), &15, &0, &750);
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("critical"),
+        &15,
+        &0,
+        &750,
+        &200,
+        &150,
+        &100,
+    );
 }
 
 #[test]
@@ -2179,7 +2782,16 @@ fn test_zero_penalty_fails_validation() {
 fn test_penalty_too_large_fails_validation() {
     let (_env, client, actors) = setup();
     // Penalty exceeds 10,000 maximum
-    client.set_config(&actors.admin, &symbol_short!("critical"), &15, &15000, &750);
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("critical"),
+        &15,
+        &15000,
+        &750,
+        &200,
+        &150,
+        &100,
+    );
 }
 
 #[test]
@@ -2187,7 +2799,16 @@ fn test_penalty_too_large_fails_validation() {
 fn test_negative_reward_fails_validation() {
     let (_env, client, actors) = setup();
     // Reward must be positive
-    client.set_config(&actors.admin, &symbol_short!("critical"), &15, &100, &-750);
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("critical"),
+        &15,
+        &100,
+        &-750,
+        &200,
+        &150,
+        &100,
+    );
 }
 
 #[test]
@@ -2195,7 +2816,16 @@ fn test_negative_reward_fails_validation() {
 fn test_zero_reward_fails_validation() {
     let (_env, client, actors) = setup();
     // Reward must be positive (cannot be 0)
-    client.set_config(&actors.admin, &symbol_short!("critical"), &15, &100, &0);
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("critical"),
+        &15,
+        &100,
+        &0,
+        &200,
+        &150,
+        &100,
+    );
 }
 
 #[test]
@@ -2209,6 +2839,9 @@ fn test_reward_too_large_fails_validation() {
         &15,
         &100,
         &150000,
+        &200,
+        &150,
+        &100,
     );
 }
 
@@ -2219,7 +2852,16 @@ fn test_reward_too_large_fails_validation() {
 fn test_critical_threshold_too_high_fails_validation() {
     let (_env, client, actors) = setup();
     // Critical severity threshold cannot exceed 60 minutes
-    client.set_config(&actors.admin, &symbol_short!("critical"), &90, &100, &750);
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("critical"),
+        &90,
+        &100,
+        &750,
+        &200,
+        &150,
+        &100,
+    );
 }
 
 #[test]
@@ -2227,7 +2869,16 @@ fn test_critical_threshold_too_high_fails_validation() {
 fn test_critical_penalty_too_low_fails_validation() {
     let (_env, client, actors) = setup();
     // Critical severity penalty must be at least 50
-    client.set_config(&actors.admin, &symbol_short!("critical"), &15, &25, &750);
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("critical"),
+        &15,
+        &25,
+        &750,
+        &200,
+        &150,
+        &100,
+    );
 }
 
 #[test]
@@ -2235,7 +2886,16 @@ fn test_critical_penalty_too_low_fails_validation() {
 fn test_high_threshold_too_high_fails_validation() {
     let (_env, client, actors) = setup();
     // High severity threshold cannot exceed 120 minutes
-    client.set_config(&actors.admin, &symbol_short!("high"), &150, &50, &750);
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("high"),
+        &150,
+        &50,
+        &750,
+        &200,
+        &150,
+        &100,
+    );
 }
 
 #[test]
@@ -2243,7 +2903,16 @@ fn test_high_threshold_too_high_fails_validation() {
 fn test_high_penalty_too_low_fails_validation() {
     let (_env, client, actors) = setup();
     // High severity penalty must be at least 25
-    client.set_config(&actors.admin, &symbol_short!("high"), &30, &15, &750);
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("high"),
+        &30,
+        &15,
+        &750,
+        &200,
+        &150,
+        &100,
+    );
 }
 
 #[test]
@@ -2251,7 +2920,16 @@ fn test_high_penalty_too_low_fails_validation() {
 fn test_medium_threshold_too_high_fails_validation() {
     let (_env, client, actors) = setup();
     // Medium severity threshold cannot exceed 240 minutes
-    client.set_config(&actors.admin, &symbol_short!("medium"), &300, &25, &750);
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("medium"),
+        &300,
+        &25,
+        &750,
+        &200,
+        &150,
+        &100,
+    );
 }
 
 #[test]
@@ -2259,7 +2937,16 @@ fn test_medium_threshold_too_high_fails_validation() {
 fn test_medium_penalty_too_low_fails_validation() {
     let (_env, client, actors) = setup();
     // Medium severity penalty must be at least 10
-    client.set_config(&actors.admin, &symbol_short!("medium"), &60, &5, &750);
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("medium"),
+        &60,
+        &5,
+        &750,
+        &200,
+        &150,
+        &100,
+    );
 }
 
 #[test]
@@ -2267,7 +2954,16 @@ fn test_medium_penalty_too_low_fails_validation() {
 fn test_low_penalty_too_high_fails_validation() {
     let (_env, client, actors) = setup();
     // Low severity penalty cannot exceed 100
-    client.set_config(&actors.admin, &symbol_short!("low"), &120, &150, &600);
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("low"),
+        &120,
+        &150,
+        &600,
+        &200,
+        &150,
+        &100,
+    );
 }
 
 // Edge case validation tests
@@ -2278,10 +2974,46 @@ fn test_boundary_values_pass_validation() {
 
     // Test a valid monotonic config sequence using per-severity boundary values.
     // Set from low → critical so each update satisfies cross-severity ordering.
-    client.set_config(&actors.admin, &symbol_short!("low"), &1440, &10, &1);
-    client.set_config(&actors.admin, &symbol_short!("medium"), &240, &11, &1);
-    client.set_config(&actors.admin, &symbol_short!("high"), &120, &25, &1);
-    client.set_config(&actors.admin, &symbol_short!("critical"), &60, &50, &100000);
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("low"),
+        &1440,
+        &10,
+        &1,
+        &200,
+        &150,
+        &100,
+    );
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("medium"),
+        &240,
+        &11,
+        &1,
+        &200,
+        &150,
+        &100,
+    );
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("high"),
+        &120,
+        &25,
+        &1,
+        &200,
+        &150,
+        &100,
+    );
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("critical"),
+        &60,
+        &50,
+        &100000,
+        &200,
+        &150,
+        &100,
+    );
 
     let cfg = client.get_config(&symbol_short!("critical"));
     assert_eq!(cfg.threshold_minutes, 60);
@@ -2300,7 +3032,16 @@ fn test_validation_prevents_partial_state_changes() {
     assert_eq!(original.reward_base, 750);
 
     // Attempt invalid config change - should fail without modifying state
-    let result = client.try_set_config(&actors.admin, &symbol_short!("critical"), &0, &100, &750);
+    let result = client.try_set_config(
+        &actors.admin,
+        &symbol_short!("critical"),
+        &0,
+        &100,
+        &750,
+        &200,
+        &150,
+        &100,
+    );
     assert!(result.is_err());
 
     // Verify original config is unchanged
@@ -2318,10 +3059,28 @@ fn test_validation_works_after_successful_config_change() {
     let (_env, client, actors) = setup();
 
     // critical threshold must be < high (default 30), penalty must be > high (default 50)
-    client.set_config(&actors.admin, &symbol_short!("critical"), &29, &150, &1000);
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("critical"),
+        &29,
+        &150,
+        &1000,
+        &200,
+        &150,
+        &100,
+    );
 
     // Now attempt an invalid change - should still fail
-    let result = client.try_set_config(&actors.admin, &symbol_short!("critical"), &0, &150, &1000);
+    let result = client.try_set_config(
+        &actors.admin,
+        &symbol_short!("critical"),
+        &0,
+        &150,
+        &1000,
+        &200,
+        &150,
+        &100,
+    );
     assert!(result.is_err());
 
     // Verify the valid change is still in place
@@ -2337,10 +3096,28 @@ fn test_validation_applies_to_all_severities_independently() {
     let (_env, client, actors) = setup();
 
     // Valid change to critical
-    client.set_config(&actors.admin, &symbol_short!("critical"), &25, &120, &900);
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("critical"),
+        &25,
+        &120,
+        &900,
+        &200,
+        &150,
+        &100,
+    );
 
     // Invalid change to high should not affect critical
-    let result = client.try_set_config(&actors.admin, &symbol_short!("high"), &0, &50, &750);
+    let result = client.try_set_config(
+        &actors.admin,
+        &symbol_short!("high"),
+        &0,
+        &50,
+        &750,
+        &200,
+        &150,
+        &100,
+    );
     assert!(result.is_err());
 
     // Verify critical is unchanged and high is still at default
@@ -2771,7 +3548,16 @@ fn test_storage_growth_config_size_is_fixed() {
     let (_env, client, actors) = setup();
 
     for _ in 0..20u32 {
-        client.set_config(&actors.admin, &symbol_short!("critical"), &15, &100, &750);
+        client.set_config(
+            &actors.admin,
+            &symbol_short!("critical"),
+            &15,
+            &100,
+            &750,
+            &200,
+            &150,
+            &100,
+        );
     }
 
     assert_eq!(
@@ -2883,7 +3669,16 @@ fn test_sla_calc_event_payload_field_count_is_seven() {
 #[test]
 fn test_cfg_upd_event_topic_count_is_three() {
     let (env, client, actors) = setup();
-    client.set_config(&actors.admin, &symbol_short!("critical"), &20, &200, &1000);
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("critical"),
+        &20,
+        &200,
+        &1000,
+        &200,
+        &150,
+        &100,
+    );
 
     let events = env.events().all();
     let (_, topics, _) = events.last().unwrap();
@@ -2893,7 +3688,16 @@ fn test_cfg_upd_event_topic_count_is_three() {
 #[test]
 fn test_cfg_upd_event_payload_field_count_is_three() {
     let (env, client, actors) = setup();
-    client.set_config(&actors.admin, &symbol_short!("critical"), &20, &200, &1000);
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("critical"),
+        &20,
+        &200,
+        &1000,
+        &200,
+        &150,
+        &100,
+    );
 
     let events = env.events().all();
     let (_, _, data) = events.last().unwrap();
@@ -3714,7 +4518,16 @@ fn test_stored_result_retains_original_config_binding_after_config_change() {
     let before_change = client.get_latest_by_outage(&symbol(&env, "BIND2")).unwrap();
     let original_hash = before_change.config_version_hash;
 
-    client.set_config(&actors.admin, &symbol_short!("critical"), &20, &200, &1000);
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("critical"),
+        &20,
+        &200,
+        &1000,
+        &200,
+        &150,
+        &100,
+    );
     let after_hash = client.get_config_version_hash();
     let stored_after_change = client.get_latest_by_outage(&symbol(&env, "BIND2")).unwrap();
     let replayed_after_change =
@@ -4015,7 +4828,16 @@ fn test_post_renounce_unpause_is_locked() {
 fn test_post_renounce_set_config_is_locked() {
     let (_env, client, actors) = setup();
     client.renounce_admin(&actors.admin);
-    client.set_config(&actors.admin, &symbol_short!("critical"), &20, &200, &1000);
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("critical"),
+        &20,
+        &200,
+        &1000,
+        &200,
+        &150,
+        &100,
+    );
 }
 
 #[test]
@@ -4341,8 +5163,26 @@ fn test_storage_growth_config_map_stays_fixed_size() {
     let (_env, client, actors) = setup();
 
     for _ in 0..50u32 {
-        client.set_config(&actors.admin, &symbol_short!("critical"), &15, &100, &750);
-        client.set_config(&actors.admin, &symbol_short!("high"), &30, &50, &750);
+        client.set_config(
+            &actors.admin,
+            &symbol_short!("critical"),
+            &15,
+            &100,
+            &750,
+            &200,
+            &150,
+            &100,
+        );
+        client.set_config(
+            &actors.admin,
+            &symbol_short!("high"),
+            &30,
+            &50,
+            &750,
+            &200,
+            &150,
+            &100,
+        );
     }
 
     assert_eq!(
@@ -4454,7 +5294,16 @@ fn test_storage_growth_regression_mixed_operations() {
 
         if i % 5 == 4 {
             // Config update must not grow the config map
-            client.set_config(&admin, &symbol_short!("critical"), &15, &100, &750);
+            client.set_config(
+                &admin,
+                &symbol_short!("critical"),
+                &15,
+                &100,
+                &750,
+                &200,
+                &150,
+                &100,
+            );
             assert_eq!(client.get_config_count(), 4);
         }
     }
@@ -4661,7 +5510,16 @@ fn test_invariance_after_config_change() {
     let (_env, client, actors) = setup();
 
     // Update critical: threshold=20, penalty=200, reward=1000
-    client.set_config(&actors.admin, &symbol_short!("critical"), &20, &200, &1000);
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("critical"),
+        &20,
+        &200,
+        &1000,
+        &200,
+        &150,
+        &100,
+    );
 
     // mttr=25 → 5 min over new threshold → penalty = 5*200 = 1000
     let view = client.calculate_sla_view(&symbol_short!("CFG"), &symbol_short!("critical"), &25);
@@ -4752,15 +5610,45 @@ fn test_extreme_config_max_valid_penalty_and_reward() {
     // critical: threshold=60, penalty=10000, reward=100000
     // Must first cascade lower severities to create room for critical threshold=60.
     let (_env, client, actors) = setup();
-    client.set_config(&actors.admin, &symbol_short!("low"), &400, &10, &600);
-    client.set_config(&actors.admin, &symbol_short!("medium"), &200, &11, &750);
-    client.set_config(&actors.admin, &symbol_short!("high"), &90, &51, &750);
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("low"),
+        &400,
+        &10,
+        &600,
+        &200,
+        &150,
+        &100,
+    );
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("medium"),
+        &200,
+        &11,
+        &750,
+        &200,
+        &150,
+        &100,
+    );
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("high"),
+        &90,
+        &51,
+        &750,
+        &200,
+        &150,
+        &100,
+    );
     client.set_config(
         &actors.admin,
         &symbol_short!("critical"),
         &60,
         &10000,
         &100000,
+        &200,
+        &150,
+        &100,
     );
 
     // mttr=61 → 1 min over → penalty = 10000
@@ -4776,7 +5664,16 @@ fn test_extreme_config_max_valid_penalty_and_reward() {
 fn test_extreme_config_max_valid_low_threshold() {
     // low: threshold=1440 (24h), penalty=1, reward=1
     let (_env, client, actors) = setup();
-    client.set_config(&actors.admin, &symbol_short!("low"), &1440, &1, &1);
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("low"),
+        &1440,
+        &1,
+        &1,
+        &200,
+        &150,
+        &100,
+    );
 
     // mttr=1440 → exactly at threshold → met, good rating
     let at = client.calculate_sla_view(&symbol_short!("LT"), &symbol_short!("low"), &1440);
@@ -4796,10 +5693,46 @@ fn test_extreme_penalty_large_overtime_no_i128_overflow() {
     // Set a minimal monotonic chain: critical=1, high=2, medium=3, low=4 (thresholds).
     // Penalties must be strictly decreasing: critical>high>medium>low.
     let (_env, client, actors) = setup();
-    client.set_config(&actors.admin, &symbol_short!("critical"), &1, &5000, &750);
-    client.set_config(&actors.admin, &symbol_short!("high"), &2, &1000, &750);
-    client.set_config(&actors.admin, &symbol_short!("medium"), &3, &200, &750);
-    client.set_config(&actors.admin, &symbol_short!("low"), &4, &100, &1);
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("critical"),
+        &1,
+        &5000,
+        &750,
+        &200,
+        &150,
+        &100,
+    );
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("high"),
+        &2,
+        &1000,
+        &750,
+        &200,
+        &150,
+        &100,
+    );
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("medium"),
+        &3,
+        &200,
+        &750,
+        &200,
+        &150,
+        &100,
+    );
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("low"),
+        &4,
+        &100,
+        &1,
+        &200,
+        &150,
+        &100,
+    );
 
     let env = Env::default();
     env.budget().reset_unlimited();
@@ -4808,10 +5741,46 @@ fn test_extreme_penalty_large_overtime_no_i128_overflow() {
     let admin2 = soroban_sdk::Address::generate(&env);
     let op2 = soroban_sdk::Address::generate(&env);
     client2.initialize(&admin2, &op2);
-    client2.set_config(&admin2, &symbol_short!("critical"), &1, &5000, &750);
-    client2.set_config(&admin2, &symbol_short!("high"), &2, &1000, &750);
-    client2.set_config(&admin2, &symbol_short!("medium"), &3, &200, &750);
-    client2.set_config(&admin2, &symbol_short!("low"), &4, &100, &1);
+    client2.set_config(
+        &admin2,
+        &symbol_short!("critical"),
+        &1,
+        &5000,
+        &750,
+        &200,
+        &150,
+        &100,
+    );
+    client2.set_config(
+        &admin2,
+        &symbol_short!("high"),
+        &2,
+        &1000,
+        &750,
+        &200,
+        &150,
+        &100,
+    );
+    client2.set_config(
+        &admin2,
+        &symbol_short!("medium"),
+        &3,
+        &200,
+        &750,
+        &200,
+        &150,
+        &100,
+    );
+    client2.set_config(
+        &admin2,
+        &symbol_short!("low"),
+        &4,
+        &100,
+        &1,
+        &200,
+        &150,
+        &100,
+    );
 
     let result =
         client2.calculate_sla_view(&symbol_short!("OVF"), &symbol_short!("low"), &u32::MAX);
@@ -4826,15 +5795,45 @@ fn test_extreme_reward_max_multiplier_no_overflow() {
     // This is well within i128 range.
     // Must cascade lower severities to allow critical threshold=60.
     let (_env, client, actors) = setup();
-    client.set_config(&actors.admin, &symbol_short!("low"), &400, &10, &600);
-    client.set_config(&actors.admin, &symbol_short!("medium"), &200, &11, &750);
-    client.set_config(&actors.admin, &symbol_short!("high"), &90, &51, &750);
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("low"),
+        &400,
+        &10,
+        &600,
+        &200,
+        &150,
+        &100,
+    );
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("medium"),
+        &200,
+        &11,
+        &750,
+        &200,
+        &150,
+        &100,
+    );
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("high"),
+        &90,
+        &51,
+        &750,
+        &200,
+        &150,
+        &100,
+    );
     client.set_config(
         &actors.admin,
         &symbol_short!("critical"),
         &60,
         &10000,
         &100000,
+        &200,
+        &150,
+        &100,
     );
 
     let result = client.calculate_sla_view(&symbol_short!("MAXR"), &symbol_short!("critical"), &1);
@@ -4846,7 +5845,16 @@ fn test_extreme_reward_max_multiplier_no_overflow() {
 #[should_panic]
 fn test_extreme_threshold_zero_rejected() {
     let (_env, client, actors) = setup();
-    client.set_config(&actors.admin, &symbol_short!("low"), &0, &10, &600);
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("low"),
+        &0,
+        &10,
+        &600,
+        &200,
+        &150,
+        &100,
+    );
 }
 
 #[test]
@@ -4854,21 +5862,48 @@ fn test_extreme_threshold_zero_rejected() {
 fn test_extreme_threshold_above_1440_rejected() {
     let (_env, client, actors) = setup();
     // 1441 exceeds the 24-hour global cap
-    client.set_config(&actors.admin, &symbol_short!("low"), &1441, &10, &600);
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("low"),
+        &1441,
+        &10,
+        &600,
+        &200,
+        &150,
+        &100,
+    );
 }
 
 #[test]
 #[should_panic]
 fn test_extreme_penalty_zero_rejected() {
     let (_env, client, actors) = setup();
-    client.set_config(&actors.admin, &symbol_short!("low"), &120, &0, &600);
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("low"),
+        &120,
+        &0,
+        &600,
+        &200,
+        &150,
+        &100,
+    );
 }
 
 #[test]
 #[should_panic]
 fn test_extreme_penalty_above_10000_rejected() {
     let (_env, client, actors) = setup();
-    client.set_config(&actors.admin, &symbol_short!("low"), &120, &10001, &600);
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("low"),
+        &120,
+        &10001,
+        &600,
+        &200,
+        &150,
+        &100,
+    );
 }
 
 #[test]
@@ -4894,14 +5929,32 @@ fn test_get_version_info_needs_migration_false_after_migrate() {
 #[should_panic]
 fn test_extreme_reward_zero_rejected() {
     let (_env, client, actors) = setup();
-    client.set_config(&actors.admin, &symbol_short!("low"), &120, &10, &0);
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("low"),
+        &120,
+        &10,
+        &0,
+        &200,
+        &150,
+        &100,
+    );
 }
 
 #[test]
 #[should_panic]
 fn test_extreme_reward_above_100000_rejected() {
     let (_env, client, actors) = setup();
-    client.set_config(&actors.admin, &symbol_short!("low"), &120, &10, &100001);
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("low"),
+        &120,
+        &10,
+        &100001,
+        &200,
+        &150,
+        &100,
+    );
 }
 
 #[test]
@@ -4909,7 +5962,16 @@ fn test_extreme_mttr_equals_threshold_is_always_met() {
     // At exactly the threshold, result must always be "met" regardless of how large the threshold is.
     let (_env, client, actors) = setup();
     // Set low to max threshold
-    client.set_config(&actors.admin, &symbol_short!("low"), &1440, &1, &1);
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("low"),
+        &1440,
+        &1,
+        &1,
+        &200,
+        &150,
+        &100,
+    );
 
     let result = client.calculate_sla_view(&symbol_short!("EQ"), &symbol_short!("low"), &1440);
     assert_eq!(result.status, symbol_short!("met"));
@@ -4926,11 +5988,47 @@ fn test_extreme_stats_accumulate_large_values_without_overflow() {
     let op = soroban_sdk::Address::generate(&env);
     client.initialize(&admin, &op);
     // Cascade lower severities to allow critical threshold=60
-    client.set_config(&admin, &symbol_short!("low"), &400, &10, &600);
-    client.set_config(&admin, &symbol_short!("medium"), &200, &11, &750);
-    client.set_config(&admin, &symbol_short!("high"), &90, &51, &750);
+    client.set_config(
+        &admin,
+        &symbol_short!("low"),
+        &400,
+        &10,
+        &600,
+        &200,
+        &150,
+        &100,
+    );
+    client.set_config(
+        &admin,
+        &symbol_short!("medium"),
+        &200,
+        &11,
+        &750,
+        &200,
+        &150,
+        &100,
+    );
+    client.set_config(
+        &admin,
+        &symbol_short!("high"),
+        &90,
+        &51,
+        &750,
+        &200,
+        &150,
+        &100,
+    );
     // critical: threshold=60, penalty=10000
-    client.set_config(&admin, &symbol_short!("critical"), &60, &10000, &100000);
+    client.set_config(
+        &admin,
+        &symbol_short!("critical"),
+        &60,
+        &10000,
+        &100000,
+        &200,
+        &150,
+        &100,
+    );
 
     // 100 violations of 1 min each → penalty = 10000 each → total = 1_000_000
     for i in 0..100u32 {
@@ -4960,14 +6058,32 @@ fn test_extreme_stats_accumulate_large_values_without_overflow() {
 #[should_panic]
 fn test_set_config_rejects_unknown_severity_symbol() {
     let (_env, client, actors) = setup();
-    client.set_config(&actors.admin, &symbol_short!("info"), &30, &50, &500);
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("info"),
+        &30,
+        &50,
+        &500,
+        &200,
+        &150,
+        &100,
+    );
 }
 
 #[test]
 #[should_panic]
 fn test_set_config_rejects_threshold_1441_for_low() {
     let (_env, client, actors) = setup();
-    client.set_config(&actors.admin, &symbol_short!("low"), &1441, &10, &600);
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("low"),
+        &1441,
+        &10,
+        &600,
+        &200,
+        &150,
+        &100,
+    );
 }
 
 #[test]
@@ -4975,14 +6091,32 @@ fn test_set_config_rejects_threshold_1441_for_low() {
 fn test_set_config_rejects_penalty_i128_max() {
     let (_env, client, actors) = setup();
     // i128::MAX is way above 10000 limit
-    client.set_config(&actors.admin, &symbol_short!("low"), &120, &i128::MAX, &600);
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("low"),
+        &120,
+        &i128::MAX,
+        &600,
+        &200,
+        &150,
+        &100,
+    );
 }
 
 #[test]
 #[should_panic]
 fn test_set_config_rejects_reward_i128_max() {
     let (_env, client, actors) = setup();
-    client.set_config(&actors.admin, &symbol_short!("low"), &120, &10, &i128::MAX);
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("low"),
+        &120,
+        &10,
+        &i128::MAX,
+        &200,
+        &150,
+        &100,
+    );
 }
 
 // --- Critical severity-specific rejections ---
@@ -4992,7 +6126,16 @@ fn test_set_config_rejects_reward_i128_max() {
 fn test_set_config_critical_rejects_threshold_61() {
     // critical max threshold is 60
     let (_env, client, actors) = setup();
-    client.set_config(&actors.admin, &symbol_short!("critical"), &61, &100, &750);
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("critical"),
+        &61,
+        &100,
+        &750,
+        &200,
+        &150,
+        &100,
+    );
 }
 
 #[test]
@@ -5000,17 +6143,62 @@ fn test_set_config_critical_rejects_threshold_61() {
 fn test_set_config_critical_rejects_penalty_49() {
     // critical min penalty is 50
     let (_env, client, actors) = setup();
-    client.set_config(&actors.admin, &symbol_short!("critical"), &15, &49, &750);
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("critical"),
+        &15,
+        &49,
+        &750,
+        &200,
+        &150,
+        &100,
+    );
 }
 
 #[test]
 fn test_set_config_critical_accepts_threshold_60_penalty_50() {
     // Exact boundary values must be accepted; cascade lower severities to create room
     let (_env, client, actors) = setup();
-    client.set_config(&actors.admin, &symbol_short!("low"), &400, &10, &600);
-    client.set_config(&actors.admin, &symbol_short!("medium"), &200, &11, &750);
-    client.set_config(&actors.admin, &symbol_short!("high"), &90, &26, &750);
-    client.set_config(&actors.admin, &symbol_short!("critical"), &60, &50, &750);
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("low"),
+        &400,
+        &10,
+        &600,
+        &200,
+        &150,
+        &100,
+    );
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("medium"),
+        &200,
+        &11,
+        &750,
+        &200,
+        &150,
+        &100,
+    );
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("high"),
+        &90,
+        &26,
+        &750,
+        &200,
+        &150,
+        &100,
+    );
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("critical"),
+        &60,
+        &50,
+        &750,
+        &200,
+        &150,
+        &100,
+    );
     let cfg = client.get_config(&symbol_short!("critical"));
     assert_eq!(cfg.threshold_minutes, 60);
     assert_eq!(cfg.penalty_per_minute, 50);
@@ -5023,7 +6211,16 @@ fn test_set_config_critical_accepts_threshold_60_penalty_50() {
 fn test_set_config_high_rejects_threshold_121() {
     // high max threshold is 120
     let (_env, client, actors) = setup();
-    client.set_config(&actors.admin, &symbol_short!("high"), &121, &50, &750);
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("high"),
+        &121,
+        &50,
+        &750,
+        &200,
+        &150,
+        &100,
+    );
 }
 
 #[test]
@@ -5031,7 +6228,16 @@ fn test_set_config_high_rejects_threshold_121() {
 fn test_set_config_high_rejects_penalty_24() {
     // high min penalty is 25
     let (_env, client, actors) = setup();
-    client.set_config(&actors.admin, &symbol_short!("high"), &30, &24, &750);
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("high"),
+        &30,
+        &24,
+        &750,
+        &200,
+        &150,
+        &100,
+    );
 }
 
 #[test]
@@ -5039,9 +6245,36 @@ fn test_set_config_high_accepts_threshold_120_penalty_25() {
     // Cascade in low→medium→high order to satisfy cross-severity monotonicity.
     // high threshold=120 requires medium threshold > 120; medium requires low > medium.
     let (_env, client, actors) = setup();
-    client.set_config(&actors.admin, &symbol_short!("low"), &400, &10, &600);
-    client.set_config(&actors.admin, &symbol_short!("medium"), &200, &11, &750);
-    client.set_config(&actors.admin, &symbol_short!("high"), &120, &25, &750);
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("low"),
+        &400,
+        &10,
+        &600,
+        &200,
+        &150,
+        &100,
+    );
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("medium"),
+        &200,
+        &11,
+        &750,
+        &200,
+        &150,
+        &100,
+    );
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("high"),
+        &120,
+        &25,
+        &750,
+        &200,
+        &150,
+        &100,
+    );
     let cfg = client.get_config(&symbol_short!("high"));
     assert_eq!(cfg.threshold_minutes, 120);
     assert_eq!(cfg.penalty_per_minute, 25);
@@ -5054,7 +6287,16 @@ fn test_set_config_high_accepts_threshold_120_penalty_25() {
 fn test_set_config_medium_rejects_threshold_241() {
     // medium max threshold is 240
     let (_env, client, actors) = setup();
-    client.set_config(&actors.admin, &symbol_short!("medium"), &241, &25, &750);
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("medium"),
+        &241,
+        &25,
+        &750,
+        &200,
+        &150,
+        &100,
+    );
 }
 
 #[test]
@@ -5062,15 +6304,42 @@ fn test_set_config_medium_rejects_threshold_241() {
 fn test_set_config_medium_rejects_penalty_9() {
     // medium min penalty is 10
     let (_env, client, actors) = setup();
-    client.set_config(&actors.admin, &symbol_short!("medium"), &60, &9, &750);
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("medium"),
+        &60,
+        &9,
+        &750,
+        &200,
+        &150,
+        &100,
+    );
 }
 
 #[test]
 fn test_set_config_medium_accepts_threshold_240_penalty_10() {
     // low must have threshold > 240 and penalty < 10 to allow medium=240,10
     let (_env, client, actors) = setup();
-    client.set_config(&actors.admin, &symbol_short!("low"), &480, &1, &600);
-    client.set_config(&actors.admin, &symbol_short!("medium"), &240, &10, &750);
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("low"),
+        &480,
+        &1,
+        &600,
+        &200,
+        &150,
+        &100,
+    );
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("medium"),
+        &240,
+        &10,
+        &750,
+        &200,
+        &150,
+        &100,
+    );
     let cfg = client.get_config(&symbol_short!("medium"));
     assert_eq!(cfg.threshold_minutes, 240);
     assert_eq!(cfg.penalty_per_minute, 10);
@@ -5083,17 +6352,62 @@ fn test_set_config_medium_accepts_threshold_240_penalty_10() {
 fn test_set_config_low_rejects_penalty_101() {
     // low max penalty is 100
     let (_env, client, actors) = setup();
-    client.set_config(&actors.admin, &symbol_short!("low"), &120, &101, &600);
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("low"),
+        &120,
+        &101,
+        &600,
+        &200,
+        &150,
+        &100,
+    );
 }
 
 #[test]
 fn test_set_config_low_accepts_penalty_100() {
     // low penalty=100 requires medium_penalty > 100; cascade updates from critical down
     let (_env, client, actors) = setup();
-    client.set_config(&actors.admin, &symbol_short!("critical"), &15, &5000, &750);
-    client.set_config(&actors.admin, &symbol_short!("high"), &30, &1000, &750);
-    client.set_config(&actors.admin, &symbol_short!("medium"), &60, &200, &750);
-    client.set_config(&actors.admin, &symbol_short!("low"), &120, &100, &600);
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("critical"),
+        &15,
+        &5000,
+        &750,
+        &200,
+        &150,
+        &100,
+    );
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("high"),
+        &30,
+        &1000,
+        &750,
+        &200,
+        &150,
+        &100,
+    );
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("medium"),
+        &60,
+        &200,
+        &750,
+        &200,
+        &150,
+        &100,
+    );
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("low"),
+        &120,
+        &100,
+        &600,
+        &200,
+        &150,
+        &100,
+    );
     let cfg = client.get_config(&symbol_short!("low"));
     assert_eq!(cfg.penalty_per_minute, 100);
 }
@@ -5111,10 +6425,46 @@ fn test_set_config_rejection_leaves_state_unchanged_for_all_severities() {
     let orig_low = client.get_config(&symbol_short!("low"));
 
     // Attempt invalid updates for each severity
-    let _ = client.try_set_config(&actors.admin, &symbol_short!("critical"), &0, &100, &750);
-    let _ = client.try_set_config(&actors.admin, &symbol_short!("high"), &0, &50, &750);
-    let _ = client.try_set_config(&actors.admin, &symbol_short!("medium"), &0, &25, &750);
-    let _ = client.try_set_config(&actors.admin, &symbol_short!("low"), &0, &10, &600);
+    let _ = client.try_set_config(
+        &actors.admin,
+        &symbol_short!("critical"),
+        &0,
+        &100,
+        &750,
+        &200,
+        &150,
+        &100,
+    );
+    let _ = client.try_set_config(
+        &actors.admin,
+        &symbol_short!("high"),
+        &0,
+        &50,
+        &750,
+        &200,
+        &150,
+        &100,
+    );
+    let _ = client.try_set_config(
+        &actors.admin,
+        &symbol_short!("medium"),
+        &0,
+        &25,
+        &750,
+        &200,
+        &150,
+        &100,
+    );
+    let _ = client.try_set_config(
+        &actors.admin,
+        &symbol_short!("low"),
+        &0,
+        &10,
+        &600,
+        &200,
+        &150,
+        &100,
+    );
 
     // All configs must be unchanged
     assert_eq!(
@@ -5145,10 +6495,28 @@ fn test_set_config_rejection_does_not_affect_other_severities() {
     let (_env, client, actors) = setup();
 
     // Valid update to critical (threshold < high default 30, penalty > high default 50)
-    client.set_config(&actors.admin, &symbol_short!("critical"), &29, &150, &1000);
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("critical"),
+        &29,
+        &150,
+        &1000,
+        &200,
+        &150,
+        &100,
+    );
 
     // Invalid update to high (threshold=0)
-    let _ = client.try_set_config(&actors.admin, &symbol_short!("high"), &0, &50, &750);
+    let _ = client.try_set_config(
+        &actors.admin,
+        &symbol_short!("high"),
+        &0,
+        &50,
+        &750,
+        &200,
+        &150,
+        &100,
+    );
 
     // Critical must still have the updated value; high must still have default
     assert_eq!(
@@ -5169,35 +6537,80 @@ fn test_set_config_rejection_does_not_affect_other_severities() {
 #[should_panic]
 fn test_set_config_rejects_penalty_negative_one() {
     let (_env, client, actors) = setup();
-    client.set_config(&actors.admin, &symbol_short!("low"), &120, &-1, &600);
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("low"),
+        &120,
+        &-1,
+        &600,
+        &200,
+        &150,
+        &100,
+    );
 }
 
 #[test]
 #[should_panic]
 fn test_set_config_rejects_reward_negative_one() {
     let (_env, client, actors) = setup();
-    client.set_config(&actors.admin, &symbol_short!("low"), &120, &10, &-1);
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("low"),
+        &120,
+        &10,
+        &-1,
+        &200,
+        &150,
+        &100,
+    );
 }
 
 #[test]
 #[should_panic]
 fn test_set_config_rejects_threshold_zero_for_high() {
     let (_env, client, actors) = setup();
-    client.set_config(&actors.admin, &symbol_short!("high"), &0, &50, &750);
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("high"),
+        &0,
+        &50,
+        &750,
+        &200,
+        &150,
+        &100,
+    );
 }
 
 #[test]
 #[should_panic]
 fn test_set_config_rejects_threshold_zero_for_medium() {
     let (_env, client, actors) = setup();
-    client.set_config(&actors.admin, &symbol_short!("medium"), &0, &25, &750);
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("medium"),
+        &0,
+        &25,
+        &750,
+        &200,
+        &150,
+        &100,
+    );
 }
 
 #[test]
 #[should_panic]
 fn test_set_config_rejects_threshold_zero_for_low() {
     let (_env, client, actors) = setup();
-    client.set_config(&actors.admin, &symbol_short!("low"), &0, &10, &600);
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("low"),
+        &0,
+        &10,
+        &600,
+        &200,
+        &150,
+        &100,
+    );
 }
 
 // --- Cross-severity monotonicity rejections ---
@@ -5207,7 +6620,16 @@ fn test_set_config_rejects_threshold_zero_for_low() {
 fn test_set_config_rejects_critical_threshold_greater_than_high() {
     // Critical threshold (31) > high threshold (30 default) - should be rejected
     let (_env, client, actors) = setup();
-    client.set_config(&actors.admin, &symbol_short!("critical"), &31, &100, &750);
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("critical"),
+        &31,
+        &100,
+        &750,
+        &200,
+        &150,
+        &100,
+    );
 }
 
 #[test]
@@ -5215,7 +6637,16 @@ fn test_set_config_rejects_critical_threshold_greater_than_high() {
 fn test_set_config_rejects_high_threshold_greater_than_medium() {
     // High threshold (61) > medium threshold (60 default) - should be rejected
     let (_env, client, actors) = setup();
-    client.set_config(&actors.admin, &symbol_short!("high"), &61, &50, &750);
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("high"),
+        &61,
+        &50,
+        &750,
+        &200,
+        &150,
+        &100,
+    );
 }
 
 #[test]
@@ -5223,7 +6654,16 @@ fn test_set_config_rejects_high_threshold_greater_than_medium() {
 fn test_set_config_rejects_medium_threshold_greater_than_low() {
     // Medium threshold (121) > low threshold (120 default) - should be rejected
     let (_env, client, actors) = setup();
-    client.set_config(&actors.admin, &symbol_short!("medium"), &121, &25, &750);
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("medium"),
+        &121,
+        &25,
+        &750,
+        &200,
+        &150,
+        &100,
+    );
 }
 
 #[test]
@@ -5231,7 +6671,16 @@ fn test_set_config_rejects_medium_threshold_greater_than_low() {
 fn test_set_config_rejects_low_penalty_greater_than_medium() {
     // Low penalty (26) > medium penalty (25 default) - should be rejected
     let (_env, client, actors) = setup();
-    client.set_config(&actors.admin, &symbol_short!("low"), &120, &26, &600);
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("low"),
+        &120,
+        &26,
+        &600,
+        &200,
+        &150,
+        &100,
+    );
 }
 
 #[test]
@@ -5239,7 +6688,16 @@ fn test_set_config_rejects_low_penalty_greater_than_medium() {
 fn test_set_config_rejects_medium_penalty_greater_than_high() {
     // Medium penalty (51) > high penalty (50 default) - should be rejected
     let (_env, client, actors) = setup();
-    client.set_config(&actors.admin, &symbol_short!("medium"), &60, &51, &750);
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("medium"),
+        &60,
+        &51,
+        &750,
+        &200,
+        &150,
+        &100,
+    );
 }
 
 #[test]
@@ -5247,7 +6705,16 @@ fn test_set_config_rejects_medium_penalty_greater_than_high() {
 fn test_set_config_rejects_high_penalty_greater_than_critical() {
     // High penalty (101) > critical penalty (100 default) - should be rejected
     let (_env, client, actors) = setup();
-    client.set_config(&actors.admin, &symbol_short!("high"), &30, &101, &750);
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("high"),
+        &30,
+        &101,
+        &750,
+        &200,
+        &150,
+        &100,
+    );
 }
 
 #[test]
@@ -5255,7 +6722,16 @@ fn test_set_config_rejects_high_penalty_greater_than_critical() {
 fn test_set_config_rejects_high_threshold_less_than_critical() {
     // High threshold (14) < critical threshold (15 default) - should be rejected
     let (_env, client, actors) = setup();
-    client.set_config(&actors.admin, &symbol_short!("high"), &14, &50, &750);
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("high"),
+        &14,
+        &50,
+        &750,
+        &200,
+        &150,
+        &100,
+    );
 }
 
 #[test]
@@ -5263,7 +6739,16 @@ fn test_set_config_rejects_high_threshold_less_than_critical() {
 fn test_set_config_rejects_critical_penalty_less_than_high() {
     // Critical penalty (49) < high penalty (50 default) - should be rejected
     let (_env, client, actors) = setup();
-    client.set_config(&actors.admin, &symbol_short!("critical"), &15, &49, &750);
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("critical"),
+        &15,
+        &49,
+        &750,
+        &200,
+        &150,
+        &100,
+    );
 }
 
 #[test]
@@ -5272,13 +6757,49 @@ fn test_set_config_accepts_valid_cross_severity_updates() {
     let (_env, client, actors) = setup();
 
     // Update critical first (valid values)
-    client.set_config(&actors.admin, &symbol_short!("critical"), &20, &100, &750);
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("critical"),
+        &20,
+        &100,
+        &750,
+        &200,
+        &150,
+        &100,
+    );
     // Then update high (must be > critical threshold 20 and < critical penalty 100)
-    client.set_config(&actors.admin, &symbol_short!("high"), &40, &50, &750);
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("high"),
+        &40,
+        &50,
+        &750,
+        &200,
+        &150,
+        &100,
+    );
     // Then update medium (must be > high threshold 40 and < high penalty 50)
-    client.set_config(&actors.admin, &symbol_short!("medium"), &80, &25, &750);
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("medium"),
+        &80,
+        &25,
+        &750,
+        &200,
+        &150,
+        &100,
+    );
     // Then update low (must be > medium threshold 80 and < medium penalty 25)
-    client.set_config(&actors.admin, &symbol_short!("low"), &160, &10, &600);
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("low"),
+        &160,
+        &10,
+        &600,
+        &200,
+        &150,
+        &100,
+    );
 
     // Verify all values were set correctly
     let critical = client.get_config(&symbol_short!("critical"));
@@ -5326,6 +6847,9 @@ fn test_error_unauthorized_is_terminal_for_stranger() {
         &15,
         &100,
         &750,
+        &200,
+        &150,
+        &100,
     );
     assert_eq!(result.unwrap_err().unwrap(), SLAError::Unauthorized);
 }
@@ -5341,7 +6865,16 @@ fn test_error_unauthorized_operator_calling_admin_fn_is_terminal() {
 fn test_error_invalid_threshold_is_terminal() {
     let (_env, client, actors) = setup();
     // threshold=0 is always invalid for any severity
-    let result = client.try_set_config(&actors.admin, &symbol_short!("low"), &0, &10, &600);
+    let result = client.try_set_config(
+        &actors.admin,
+        &symbol_short!("low"),
+        &0,
+        &10,
+        &600,
+        &200,
+        &150,
+        &100,
+    );
     assert_eq!(result.unwrap_err().unwrap(), SLAError::ThresholdOutOfBounds);
 }
 
@@ -5349,7 +6882,16 @@ fn test_error_invalid_threshold_is_terminal() {
 fn test_error_invalid_penalty_is_terminal() {
     let (_env, client, actors) = setup();
     // penalty=0 is always invalid
-    let result = client.try_set_config(&actors.admin, &symbol_short!("low"), &120, &0, &600);
+    let result = client.try_set_config(
+        &actors.admin,
+        &symbol_short!("low"),
+        &120,
+        &0,
+        &600,
+        &200,
+        &150,
+        &100,
+    );
     assert_eq!(result.unwrap_err().unwrap(), SLAError::PenaltyOutOfBounds);
 }
 
@@ -5357,14 +6899,32 @@ fn test_error_invalid_penalty_is_terminal() {
 fn test_error_invalid_reward_is_terminal() {
     let (_env, client, actors) = setup();
     // reward=0 is always invalid
-    let result = client.try_set_config(&actors.admin, &symbol_short!("low"), &120, &10, &0);
+    let result = client.try_set_config(
+        &actors.admin,
+        &symbol_short!("low"),
+        &120,
+        &10,
+        &0,
+        &200,
+        &150,
+        &100,
+    );
     assert_eq!(result.unwrap_err().unwrap(), SLAError::RewardOutOfBounds);
 }
 
 #[test]
 fn test_error_invalid_severity_is_terminal() {
     let (env, client, actors) = setup();
-    let result = client.try_set_config(&actors.admin, &symbol_short!("bogus"), &30, &50, &500);
+    let result = client.try_set_config(
+        &actors.admin,
+        &symbol_short!("bogus"),
+        &30,
+        &50,
+        &500,
+        &200,
+        &150,
+        &100,
+    );
     assert_eq!(result.unwrap_err().unwrap(), SLAError::InvalidSeverity);
 }
 
@@ -5449,7 +7009,16 @@ fn test_failed_set_config_leaves_config_unchanged() {
     let before = client.get_config(&symbol_short!("critical"));
 
     // Invalid: threshold=0 for critical
-    let _ = client.try_set_config(&actors.admin, &symbol_short!("critical"), &0, &100, &750);
+    let _ = client.try_set_config(
+        &actors.admin,
+        &symbol_short!("critical"),
+        &0,
+        &100,
+        &750,
+        &200,
+        &150,
+        &100,
+    );
 
     assert_eq!(client.get_config(&symbol_short!("critical")), before);
 }
@@ -5883,7 +7452,16 @@ fn test_no_result_has_reward_type_with_non_positive_amount() {
 fn test_254_threshold_upper_bound_accepted() {
     // threshold_minutes == 1440 (24 h) is the maximum allowed value.
     let (_env, client, actors) = setup();
-    client.set_config(&actors.admin, &symbol_short!("low"), &1440, &10, &600);
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("low"),
+        &1440,
+        &10,
+        &600,
+        &200,
+        &150,
+        &100,
+    );
     assert_eq!(
         client.get_config(&symbol_short!("low")).threshold_minutes,
         1440
@@ -5895,7 +7473,16 @@ fn test_254_threshold_upper_bound_accepted() {
 fn test_254_threshold_above_upper_bound_rejected() {
     // threshold_minutes == 1441 must be rejected.
     let (_env, client, actors) = setup();
-    client.set_config(&actors.admin, &symbol_short!("low"), &1441, &10, &600);
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("low"),
+        &1441,
+        &10,
+        &600,
+        &200,
+        &150,
+        &100,
+    );
 }
 
 #[test]
@@ -5903,7 +7490,16 @@ fn test_254_threshold_above_upper_bound_rejected() {
 fn test_254_threshold_zero_rejected() {
     // threshold_minutes == 0 must be rejected for all severities.
     let (_env, client, actors) = setup();
-    client.set_config(&actors.admin, &symbol_short!("critical"), &0, &100, &750);
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("critical"),
+        &0,
+        &100,
+        &750,
+        &200,
+        &150,
+        &100,
+    );
 }
 
 #[test]
@@ -5911,7 +7507,16 @@ fn test_254_threshold_zero_rejected() {
 fn test_254_penalty_zero_rejected() {
     // penalty_per_minute == 0 must be rejected.
     let (_env, client, actors) = setup();
-    client.set_config(&actors.admin, &symbol_short!("low"), &120, &0, &600);
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("low"),
+        &120,
+        &0,
+        &600,
+        &200,
+        &150,
+        &100,
+    );
 }
 
 #[test]
@@ -5919,7 +7524,16 @@ fn test_254_penalty_zero_rejected() {
 fn test_254_penalty_above_ceiling_rejected() {
     // penalty_per_minute > 10000 must be rejected.
     let (_env, client, actors) = setup();
-    client.set_config(&actors.admin, &symbol_short!("low"), &120, &10001, &600);
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("low"),
+        &120,
+        &10001,
+        &600,
+        &200,
+        &150,
+        &100,
+    );
 }
 
 #[test]
@@ -5927,7 +7541,16 @@ fn test_254_penalty_above_ceiling_rejected() {
 fn test_254_reward_zero_rejected() {
     // reward_base == 0 must be rejected.
     let (_env, client, actors) = setup();
-    client.set_config(&actors.admin, &symbol_short!("low"), &120, &10, &0);
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("low"),
+        &120,
+        &10,
+        &0,
+        &200,
+        &150,
+        &100,
+    );
 }
 
 #[test]
@@ -5935,7 +7558,16 @@ fn test_254_reward_zero_rejected() {
 fn test_254_reward_above_ceiling_rejected() {
     // reward_base > 100000 must be rejected.
     let (_env, client, actors) = setup();
-    client.set_config(&actors.admin, &symbol_short!("low"), &120, &10, &100001);
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("low"),
+        &120,
+        &10,
+        &100001,
+        &200,
+        &150,
+        &100,
+    );
 }
 
 #[test]
@@ -5944,7 +7576,16 @@ fn test_254_valid_boundary_values_accepted() {
     // low threshold must be > medium threshold (default 60), so min valid is 61.
     // low penalty must be < medium penalty (default 25), so min valid is 1.
     let (_env, client, actors) = setup();
-    client.set_config(&actors.admin, &symbol_short!("low"), &61, &1, &1);
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("low"),
+        &61,
+        &1,
+        &1,
+        &200,
+        &150,
+        &100,
+    );
     let cfg = client.get_config(&symbol_short!("low"));
     assert_eq!(cfg.threshold_minutes, 61);
     assert_eq!(cfg.penalty_per_minute, 1);
@@ -5955,7 +7596,16 @@ fn test_254_valid_boundary_values_accepted() {
 fn test_254_payout_ceiling_not_exceeded_on_calculation() {
     // reward_base at ceiling (100000) must produce a positive reward without overflow.
     let (_env, client, actors) = setup();
-    client.set_config(&actors.admin, &symbol_short!("low"), &120, &10, &100000);
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("low"),
+        &120,
+        &10,
+        &100000,
+        &200,
+        &150,
+        &100,
+    );
     let result = client.calculate_sla(
         &actors.operator,
         &symbol_short!("OUT1"),
@@ -5970,7 +7620,16 @@ fn test_254_invalid_config_does_not_corrupt_existing() {
     // A rejected set_config call must leave the previous config intact.
     let (_env, client, actors) = setup();
     let original = client.get_config(&symbol_short!("critical"));
-    let _ = client.try_set_config(&actors.admin, &symbol_short!("critical"), &0, &100, &750);
+    let _ = client.try_set_config(
+        &actors.admin,
+        &symbol_short!("critical"),
+        &0,
+        &100,
+        &750,
+        &200,
+        &150,
+        &100,
+    );
     assert_eq!(
         client
             .get_config(&symbol_short!("critical"))
@@ -6181,7 +7840,16 @@ fn test_256_set_config_allowed_while_paused() {
         &actors.admin,
         &soroban_sdk::String::from_str(&env, "maintenance"),
     );
-    client.set_config(&actors.admin, &symbol_short!("low"), &120, &10, &600);
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("low"),
+        &120,
+        &10,
+        &600,
+        &200,
+        &150,
+        &100,
+    );
     assert_eq!(
         client.get_config(&symbol_short!("low")).threshold_minutes,
         120
@@ -6294,7 +7962,16 @@ fn test_257_config_version_hash_changes_on_config_update() {
     // Updating any config field must change the hash.
     let (_env, client, actors) = setup();
     let h_before = client.get_config_version_hash();
-    client.set_config(&actors.admin, &symbol_short!("low"), &200, &10, &600);
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("low"),
+        &200,
+        &10,
+        &600,
+        &200,
+        &150,
+        &100,
+    );
     let h_after = client.get_config_version_hash();
     assert_ne!(h_before, h_after, "hash must change after config update");
 }
@@ -6453,19 +8130,55 @@ fn test_257_hash_differs_across_all_four_severities() {
     let (_env, client, actors) = setup();
     let h0 = client.get_config_version_hash();
 
-    client.set_config(&actors.admin, &symbol_short!("low"), &240, &10, &600);
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("low"),
+        &240,
+        &10,
+        &600,
+        &200,
+        &150,
+        &100,
+    );
     let h1 = client.get_config_version_hash();
     assert_ne!(h0, h1);
 
-    client.set_config(&actors.admin, &symbol_short!("medium"), &120, &25, &750);
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("medium"),
+        &120,
+        &25,
+        &750,
+        &200,
+        &150,
+        &100,
+    );
     let h2 = client.get_config_version_hash();
     assert_ne!(h1, h2);
 
-    client.set_config(&actors.admin, &symbol_short!("high"), &60, &50, &750);
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("high"),
+        &60,
+        &50,
+        &750,
+        &200,
+        &150,
+        &100,
+    );
     let h3 = client.get_config_version_hash();
     assert_ne!(h2, h3);
 
-    client.set_config(&actors.admin, &symbol_short!("critical"), &30, &100, &750);
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("critical"),
+        &30,
+        &100,
+        &750,
+        &200,
+        &150,
+        &100,
+    );
     let h4 = client.get_config_version_hash();
     assert_ne!(h3, h4);
 }

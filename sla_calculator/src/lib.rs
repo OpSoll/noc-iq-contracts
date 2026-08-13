@@ -12,10 +12,12 @@ pub struct SLACalculatorContract;
 mod tests;
 
 pub mod adaptive_tuning;
+pub mod batch;
 pub mod coordination_harness;
 pub mod cross_contract_safety;
 pub mod event_correlation;
 mod event_schema;
+pub mod storage_helpers;
 pub mod version_negotiation;
 
 // -----------------------------------------------------------------------
@@ -84,6 +86,7 @@ const EVENT_ADMIN_REN: Symbol = symbol_short!("adm_ren"); // #65
 const EVENT_OP_PROP: Symbol = symbol_short!("op_prop"); // #64
 const EVENT_OP_ACC: Symbol = symbol_short!("op_acc"); // #64
 const EVENT_OP_CAN: Symbol = symbol_short!("op_can"); // SC-024
+const EVENT_OP_REV: Symbol = symbol_short!("op_rev"); // #472
 const EVENT_VERSION: Symbol = symbol_short!("v1");
 
 // -----------------------------------------------------------------------
@@ -126,6 +129,9 @@ pub struct SLAConfig {
     pub threshold_minutes: u32,
     pub penalty_per_minute: i128,
     pub reward_base: i128,
+    pub top_tier_multiplier: u32,
+    pub excel_tier_multiplier: u32,
+    pub good_tier_multiplier: u32,
 }
 
 /// Input type for outage data used in SLA calculations
@@ -162,8 +168,6 @@ pub struct SLAResult {
     pub config_version_hash: u64, // deterministic binding to config used for evaluation
     pub recorded_at: u64,         // SC-063: ledger timestamp at calculation time
 }
-
-pub mod batch;
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -367,6 +371,9 @@ impl SLACalculatorContract {
                 threshold_minutes: 15,
                 penalty_per_minute: 100,
                 reward_base: 750,
+                top_tier_multiplier: 200,
+                excel_tier_multiplier: 150,
+                good_tier_multiplier: 100,
             },
         );
         configs.set(
@@ -375,6 +382,9 @@ impl SLACalculatorContract {
                 threshold_minutes: 30,
                 penalty_per_minute: 50,
                 reward_base: 750,
+                top_tier_multiplier: 200,
+                excel_tier_multiplier: 150,
+                good_tier_multiplier: 100,
             },
         );
         configs.set(
@@ -383,6 +393,9 @@ impl SLACalculatorContract {
                 threshold_minutes: 60,
                 penalty_per_minute: 25,
                 reward_base: 750,
+                top_tier_multiplier: 200,
+                excel_tier_multiplier: 150,
+                good_tier_multiplier: 100,
             },
         );
         configs.set(
@@ -391,6 +404,9 @@ impl SLACalculatorContract {
                 threshold_minutes: 120,
                 penalty_per_minute: 10,
                 reward_base: 600,
+                top_tier_multiplier: 200,
+                excel_tier_multiplier: 150,
+                good_tier_multiplier: 100,
             },
         );
 
@@ -503,6 +519,26 @@ impl SLACalculatorContract {
             (EVENT_OP_SET, EVENT_VERSION, caller),
             (new_operator.clone(),),
         );
+
+        Ok(())
+    }
+
+    /// #472 – Revoke the operator role entirely (admin only).
+    ///
+    /// Removes the operator address and any pending operator proposal from
+    /// contract storage. After revocation, `calculate_sla` will fail with
+    /// `Unauthorized` until a new operator is configured via `set_operator`
+    /// or the two-step handoff (`propose_operator` / `accept_operator`).
+    /// Emits an `op_rev` event with the caller address context.
+    pub fn revoke_operator(env: Env, caller: Address) -> Result<(), SLAError> {
+        Self::check_version(&env)?;
+        Self::require_admin(&env, &caller)?;
+
+        env.storage().instance().remove(&OPERATOR_KEY);
+        env.storage().instance().remove(&PENDING_OP_KEY);
+
+        env.events()
+            .publish((EVENT_OP_REV, EVENT_VERSION, caller), ());
 
         Ok(())
     }
@@ -733,6 +769,7 @@ impl SLACalculatorContract {
     // Config management (admin only)                                 #28
     // -------------------------------------------------------------------
 
+    #[allow(clippy::too_many_arguments)]
     pub fn set_config(
         env: Env,
         caller: Address,
@@ -740,6 +777,9 @@ impl SLACalculatorContract {
         threshold_minutes: u32,
         penalty_per_minute: i128,
         reward_base: i128,
+        top_tier_multiplier: u32,
+        excel_tier_multiplier: u32,
+        good_tier_multiplier: u32,
     ) -> Result<(), SLAError> {
         Self::check_version(&env)?;
         Self::require_admin(&env, &caller)?; // #28 – admin role enforced
@@ -767,6 +807,9 @@ impl SLACalculatorContract {
                 threshold_minutes,
                 penalty_per_minute,
                 reward_base,
+                top_tier_multiplier,
+                excel_tier_multiplier,
+                good_tier_multiplier,
             },
         );
         env.storage().instance().set(&CONFIG_KEY, &configs);
@@ -819,6 +862,9 @@ impl SLACalculatorContract {
                 threshold_minutes: 15,
                 penalty_per_minute: 100,
                 reward_base: 750,
+                top_tier_multiplier: 200,
+                excel_tier_multiplier: 150,
+                good_tier_multiplier: 100,
             },
         );
         configs.set(
@@ -827,6 +873,9 @@ impl SLACalculatorContract {
                 threshold_minutes: 30,
                 penalty_per_minute: 50,
                 reward_base: 750,
+                top_tier_multiplier: 200,
+                excel_tier_multiplier: 150,
+                good_tier_multiplier: 100,
             },
         );
         configs.set(
@@ -835,6 +884,9 @@ impl SLACalculatorContract {
                 threshold_minutes: 60,
                 penalty_per_minute: 25,
                 reward_base: 750,
+                top_tier_multiplier: 200,
+                excel_tier_multiplier: 150,
+                good_tier_multiplier: 100,
             },
         );
         configs.set(
@@ -843,6 +895,9 @@ impl SLACalculatorContract {
                 threshold_minutes: 120,
                 penalty_per_minute: 10,
                 reward_base: 600,
+                top_tier_multiplier: 200,
+                excel_tier_multiplier: 150,
+                good_tier_multiplier: 100,
             },
         );
 
@@ -866,6 +921,17 @@ impl SLACalculatorContract {
             .get(&CONFIG_KEY)
             .ok_or(SLAError::NotInitialized)?;
         Self::compute_config_version_hash(&env, &configs)
+    }
+
+    /// Returns a deterministic hash of an SLAResult payload using the same
+    /// polynomial rolling hash algorithm as `get_config_version_hash`.
+    ///
+    /// Off-chain backend services can use this to verify whether a given
+    /// SLAResult matches an authentic contract outcome without re-executing
+    /// stateful calculation calls.
+    pub fn compute_result_hash(env: Env, result: SLAResult) -> Result<u64, SLAError> {
+        Self::check_version(&env)?;
+        Ok(Self::compute_result_hash_inner(&result))
     }
 
     /// SC-W5-046 – Returns the full catalogue of typed failure codes.
@@ -1000,8 +1066,8 @@ impl SLACalculatorContract {
     pub fn simulate_sla(env: Env, outage: OutageInput) -> Result<SlaSimulationResult, SLAError> {
         Self::check_version(&env)?;
         // Validate inputs just like in production calculations
-        Self::validate_symbol_input(&env, &outage.outage_id, true)?;
-        Self::validate_symbol_input(&env, &outage.severity, false)?;
+        Self::validate_symbol_input(&outage.outage_id, true)?;
+        Self::validate_symbol_input(&outage.severity, false)?;
         // We bypass pause and operator checks to allow public simulation
         let cfg = Self::load_config(&env, &outage.severity)?;
         // Delegate to pure core calculation logic - no storage writes, no events emitted
@@ -1016,8 +1082,8 @@ impl SLACalculatorContract {
     ) -> Result<SLAResult, SLAError> {
         Self::check_version(&env)?;
         // Graceful degradation: validate inputs before processing
-        Self::validate_symbol_input(&env, &outage_id, true)?;
-        Self::validate_symbol_input(&env, &severity, false)?;
+        Self::validate_symbol_input(&outage_id, true)?;
+        Self::validate_symbol_input(&severity, false)?;
         // We bypass pause and operator checks to allow continuous, public verification
         let configs: Map<Symbol, SLAConfig> = env
             .storage()
@@ -1235,8 +1301,8 @@ impl SLACalculatorContract {
     ) -> Result<SLAResult, SLAError> {
         Self::check_version(&env)?;
         // Graceful degradation: validate inputs before processing
-        Self::validate_symbol_input(&env, &outage_id, true)?;
-        Self::validate_symbol_input(&env, &severity, false)?;
+        Self::validate_symbol_input(&outage_id, true)?;
+        Self::validate_symbol_input(&severity, false)?;
         Self::require_not_paused(&env)?; // #27
         Self::require_operator(&env, &caller)?; // #28
 
@@ -1362,7 +1428,9 @@ impl SLACalculatorContract {
         // Case 1: SLA violated → penalty
         if mttr_minutes > threshold {
             let overtime = (mttr_minutes - threshold) as i128;
-            let penalty = overtime.saturating_mul(cfg.penalty_per_minute);
+            let penalty = overtime
+                .checked_mul(cfg.penalty_per_minute)
+                .ok_or(SLAError::InvalidPenaltyAmount)?;
             let amount = -penalty;
             if amount >= 0 {
                 return Err(SLAError::InvalidPenaltyAmount);
@@ -1384,20 +1452,18 @@ impl SLACalculatorContract {
             let performance_ratio = (mttr_minutes * 100).checked_div(threshold).unwrap_or(0);
 
             let (multiplier, rating) = if performance_ratio < 50 {
-                (200u32, symbol_short!("top"))
+                (cfg.top_tier_multiplier, symbol_short!("top"))
             } else if performance_ratio < 75 {
-                (150u32, symbol_short!("excel"))
+                (cfg.excel_tier_multiplier, symbol_short!("excel"))
             } else {
-                (100u32, symbol_short!("good"))
+                (cfg.good_tier_multiplier, symbol_short!("good"))
             };
 
             let reward = cfg
                 .reward_base
-                .saturating_mul(multiplier as i128)
+                .checked_mul(multiplier as i128)
+                .ok_or(SLAError::InvalidRewardAmount)?
                 .div_euclid(100);
-            if reward <= 0 {
-                return Err(SLAError::InvalidRewardAmount);
-            }
 
             Ok(SLAResult {
                 outage_id,
@@ -1460,11 +1526,7 @@ impl SLACalculatorContract {
     /// and contains only valid characters (a-zA-Z0-9_). Returns `InvalidOutageId`
     /// for outage IDs or `MalformedSymbolInput` for other symbols when validation
     /// fails, allowing graceful degradation instead of panicking.
-    fn validate_symbol_input(
-        _env: &Env,
-        _symbol: &Symbol,
-        _is_outage_id: bool,
-    ) -> Result<(), SLAError> {
+    fn validate_symbol_input(_symbol: &Symbol, _is_outage_id: bool) -> Result<(), SLAError> {
         // Soroban Symbol is natively restricted to valid characters and max length 32.
         Ok(())
     }
@@ -1650,6 +1712,39 @@ impl SLACalculatorContract {
         }
 
         Ok(hash.wrapping_mul(BASE).wrapping_add(0x9e3779b97f4a7c15u64) % MODULUS)
+    }
+
+    #[allow(unused_assignments)]
+    fn compute_result_hash_inner(result: &SLAResult) -> u64 {
+        const BASE: u64 = 91138233;
+        const MODULUS: u64 = (1u64 << 63) - 25;
+
+        let mut hash: u64 = 1;
+        let mut power: u64 = 1;
+
+        macro_rules! mix {
+            ($v:expr) => {
+                hash = hash
+                    .wrapping_mul(BASE)
+                    .wrapping_add($v as u64)
+                    .wrapping_mul(power)
+                    % MODULUS;
+                power = power.wrapping_mul(BASE) % MODULUS;
+            };
+        }
+
+        mix!(result.outage_id.to_val().get_payload());
+        mix!(result.status.to_val().get_payload());
+        mix!(result.mttr_minutes);
+        mix!(result.threshold_minutes);
+        mix!(result.amount as u64);
+        mix!((result.amount >> 64) as u64);
+        mix!(result.payment_type.to_val().get_payload());
+        mix!(result.rating.to_val().get_payload());
+        mix!(result.config_version_hash);
+        mix!(result.recorded_at);
+
+        hash.wrapping_mul(BASE).wrapping_add(0x9e3779b97f4a7c15u64) % MODULUS
     }
 
     /// Optimised config lookup with severity index pre-check for early rejection.
