@@ -11,14 +11,14 @@ pub struct SLACalculatorContract;
 #[cfg(test)]
 mod tests;
 
+pub mod adaptive_tuning;
+pub mod batch;
 pub mod coordination_harness;
 pub mod cross_contract_safety;
 pub mod event_correlation;
 mod event_schema;
-pub mod adaptive_tuning;
-pub mod version_negotiation;
-pub mod batch;
 pub mod storage_helpers;
+pub mod version_negotiation;
 
 // -----------------------------------------------------------------------
 // Storage keys
@@ -360,7 +360,9 @@ impl SLACalculatorContract {
         env.storage()
             .instance()
             .set(&HISTORY_KEY, &Vec::<SLAResult>::new(&env));
-        env.storage().instance().set(&INIT_TIME_KEY, &env.ledger().timestamp());
+        env.storage()
+            .instance()
+            .set(&INIT_TIME_KEY, &env.ledger().timestamp());
 
         let mut configs = Map::<Symbol, SLAConfig>::new(&env);
         configs.set(
@@ -368,7 +370,10 @@ impl SLACalculatorContract {
             SLAConfig {
                 threshold_minutes: 15,
                 penalty_per_minute: 100,
-                reward_base: 750, top_tier_multiplier: 200, excel_tier_multiplier: 150, good_tier_multiplier: 100,
+                reward_base: 750,
+                top_tier_multiplier: 200,
+                excel_tier_multiplier: 150,
+                good_tier_multiplier: 100,
             },
         );
         configs.set(
@@ -376,7 +381,10 @@ impl SLACalculatorContract {
             SLAConfig {
                 threshold_minutes: 30,
                 penalty_per_minute: 50,
-                reward_base: 750, top_tier_multiplier: 200, excel_tier_multiplier: 150, good_tier_multiplier: 100,
+                reward_base: 750,
+                top_tier_multiplier: 200,
+                excel_tier_multiplier: 150,
+                good_tier_multiplier: 100,
             },
         );
         configs.set(
@@ -384,7 +392,10 @@ impl SLACalculatorContract {
             SLAConfig {
                 threshold_minutes: 60,
                 penalty_per_minute: 25,
-                reward_base: 750, top_tier_multiplier: 200, excel_tier_multiplier: 150, good_tier_multiplier: 100,
+                reward_base: 750,
+                top_tier_multiplier: 200,
+                excel_tier_multiplier: 150,
+                good_tier_multiplier: 100,
             },
         );
         configs.set(
@@ -392,7 +403,10 @@ impl SLACalculatorContract {
             SLAConfig {
                 threshold_minutes: 120,
                 penalty_per_minute: 10,
-                reward_base: 600, top_tier_multiplier: 200, excel_tier_multiplier: 150, good_tier_multiplier: 100,
+                reward_base: 600,
+                top_tier_multiplier: 200,
+                excel_tier_multiplier: 150,
+                good_tier_multiplier: 100,
             },
         );
 
@@ -523,10 +537,8 @@ impl SLACalculatorContract {
         env.storage().instance().remove(&OPERATOR_KEY);
         env.storage().instance().remove(&PENDING_OP_KEY);
 
-        env.events().publish(
-            (EVENT_OP_REV, EVENT_VERSION, caller),
-            (),
-        );
+        env.events()
+            .publish((EVENT_OP_REV, EVENT_VERSION, caller), ());
 
         Ok(())
     }
@@ -559,14 +571,14 @@ impl SLACalculatorContract {
             .instance()
             .get(&PENDING_ADMIN_KEY)
             .ok_or(SLAError::NoPendingTransfer)?;
-            
+
         // Check if proposal has expired
         let now = env.ledger().timestamp();
         if now - pending.proposed_at > PROPOSAL_EXPIRATION_SECONDS {
             env.storage().instance().remove(&PENDING_ADMIN_KEY);
             return Err(SLAError::NoPendingTransfer);
         }
-        
+
         if caller != pending.target {
             return Err(SLAError::Unauthorized);
         }
@@ -656,14 +668,14 @@ impl SLACalculatorContract {
             .instance()
             .get(&PENDING_OP_KEY)
             .ok_or(SLAError::NoPendingTransfer)?;
-            
+
         // Check if proposal has expired
         let now = env.ledger().timestamp();
         if now - pending.proposed_at > PROPOSAL_EXPIRATION_SECONDS {
             env.storage().instance().remove(&PENDING_OP_KEY);
             return Err(SLAError::NoPendingTransfer);
         }
-        
+
         if caller != pending.target {
             return Err(SLAError::Unauthorized);
         }
@@ -688,7 +700,6 @@ impl SLACalculatorContract {
             .publish((EVENT_OP_CAN, EVENT_VERSION, caller), ());
         Ok(())
     }
-
 
     // -------------------------------------------------------------------
     // #65 – Admin renounce
@@ -758,6 +769,7 @@ impl SLACalculatorContract {
     // Config management (admin only)                                 #28
     // -------------------------------------------------------------------
 
+    #[allow(clippy::too_many_arguments)]
     pub fn set_config(
         env: Env,
         caller: Address,
@@ -849,7 +861,10 @@ impl SLACalculatorContract {
             SLAConfig {
                 threshold_minutes: 15,
                 penalty_per_minute: 100,
-                reward_base: 750, top_tier_multiplier: 200, excel_tier_multiplier: 150, good_tier_multiplier: 100,
+                reward_base: 750,
+                top_tier_multiplier: 200,
+                excel_tier_multiplier: 150,
+                good_tier_multiplier: 100,
             },
         );
         configs.set(
@@ -857,7 +872,10 @@ impl SLACalculatorContract {
             SLAConfig {
                 threshold_minutes: 30,
                 penalty_per_minute: 50,
-                reward_base: 750, top_tier_multiplier: 200, excel_tier_multiplier: 150, good_tier_multiplier: 100,
+                reward_base: 750,
+                top_tier_multiplier: 200,
+                excel_tier_multiplier: 150,
+                good_tier_multiplier: 100,
             },
         );
         configs.set(
@@ -865,7 +883,10 @@ impl SLACalculatorContract {
             SLAConfig {
                 threshold_minutes: 60,
                 penalty_per_minute: 25,
-                reward_base: 750, top_tier_multiplier: 200, excel_tier_multiplier: 150, good_tier_multiplier: 100,
+                reward_base: 750,
+                top_tier_multiplier: 200,
+                excel_tier_multiplier: 150,
+                good_tier_multiplier: 100,
             },
         );
         configs.set(
@@ -873,7 +894,10 @@ impl SLACalculatorContract {
             SLAConfig {
                 threshold_minutes: 120,
                 penalty_per_minute: 10,
-                reward_base: 600, top_tier_multiplier: 200, excel_tier_multiplier: 150, good_tier_multiplier: 100,
+                reward_base: 600,
+                top_tier_multiplier: 200,
+                excel_tier_multiplier: 150,
+                good_tier_multiplier: 100,
             },
         );
 
@@ -1031,11 +1055,11 @@ impl SLACalculatorContract {
     /// storage or emitting any events. This is a pure read-only function that can be called
     /// safely and repeatedly without side effects. It returns only the computational results
     /// of the SLA calculation.
-    /// 
+    ///
     /// # Arguments
     /// * `env` - The Soroban environment
     /// * `outage` - The outage input data containing outage ID, severity, and MTTR minutes
-    /// 
+    ///
     /// # Returns
     /// * `SlaResult` - Contains breach status, penalty amount, uptime basis points, and the
     ///   applied severity tier
@@ -1060,12 +1084,15 @@ impl SLACalculatorContract {
         // Graceful degradation: validate inputs before processing
         Self::validate_symbol_input(&outage_id, true)?;
         Self::validate_symbol_input(&severity, false)?;
-        if mttr_minutes == 0 {
-            return Err(SLAError::InvalidMTTR);
-        }
         // We bypass pause and operator checks to allow continuous, public verification
-        let configs: Map<Symbol, SLAConfig> = env.storage().instance().get(&CONFIG_KEY).ok_or(SLAError::NotInitialized)?;
-        let cfg = configs.get(severity.clone()).ok_or(SLAError::ConfigNotFound)?;
+        let configs: Map<Symbol, SLAConfig> = env
+            .storage()
+            .instance()
+            .get(&CONFIG_KEY)
+            .ok_or(SLAError::NotInitialized)?;
+        let cfg = configs
+            .get(severity.clone())
+            .ok_or(SLAError::ConfigNotFound)?;
         let config_version_hash = Self::compute_config_version_hash(&env, &configs)?;
 
         // Delegate to pure internal math without mutating state or emitting events.
@@ -1090,13 +1117,13 @@ impl SLACalculatorContract {
         month: u32,
     ) -> Result<u32, SLAError> {
         Self::check_version(&env)?;
-        if month < 1 || month > 12 {
-            return Err(SLAError::InvalidMTTR);
+        if !(1..=12).contains(&month) {
+            return Err(SLAError::InvalidMonth);
         }
 
         let mut days = 0;
         for y in 1970..year {
-            days += if y % 4 == 0 && (y % 100 != 0 || y % 400 == 0) {
+            days += if y.is_multiple_of(4) && (!y.is_multiple_of(100) || y.is_multiple_of(400)) {
                 366
             } else {
                 365
@@ -1107,7 +1134,9 @@ impl SLACalculatorContract {
                 1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
                 4 | 6 | 9 | 11 => 30,
                 2 => {
-                    if year % 4 == 0 && (year % 100 != 0 || year % 400 == 0) {
+                    if year.is_multiple_of(4)
+                        && (!year.is_multiple_of(100) || year.is_multiple_of(400))
+                    {
                         29
                     } else {
                         28
@@ -1124,7 +1153,8 @@ impl SLACalculatorContract {
             1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
             4 | 6 | 9 | 11 => 30,
             2 => {
-                if year % 4 == 0 && (year % 100 != 0 || year % 400 == 0) {
+                if year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400))
+                {
                     29
                 } else {
                     28
@@ -1167,11 +1197,17 @@ impl SLACalculatorContract {
     pub fn batch_calculate_view(
         env: Env,
         requests: soroban_sdk::Vec<crate::batch::BatchRequest>,
-    ) -> Result<(crate::batch::BatchSummary, soroban_sdk::Vec<crate::batch::BatchResult>), SLAError> {
+    ) -> Result<
+        (
+            crate::batch::BatchSummary,
+            soroban_sdk::Vec<crate::batch::BatchResult>,
+        ),
+        SLAError,
+    > {
         Self::check_version(&env)?;
         // Validate batch inputs before processing
         crate::batch::validate_batch(&env, &requests)?;
-        
+
         // Bypass all authorization and pause checks to allow public verification
         let configs: soroban_sdk::Map<Symbol, SLAConfig> = env
             .storage()
@@ -1197,10 +1233,12 @@ impl SLACalculatorContract {
                     } else {
                         total_rewards = total_rewards.saturating_add(result.amount);
                     }
+                    let mut res_vec = Vec::new(&env);
+                    res_vec.push_back(result);
                     results.push_back(crate::batch::BatchResult {
                         outage_id: req.outage_id.clone(),
                         success: true,
-                        result: Some(result),
+                        result: res_vec,
                         error: None,
                     });
                 }
@@ -1215,7 +1253,7 @@ impl SLACalculatorContract {
                     results.push_back(crate::batch::BatchResult {
                         outage_id: req.outage_id.clone(),
                         success: false,
-                        result: None,
+                        result: Vec::new(&env),
                         error: Some(error_msg),
                     });
                 }
@@ -1240,7 +1278,13 @@ impl SLACalculatorContract {
         env: Env,
         caller: Address,
         requests: soroban_sdk::Vec<crate::batch::BatchRequest>,
-    ) -> Result<(crate::batch::BatchSummary, soroban_sdk::Vec<crate::batch::BatchResult>), SLAError> {
+    ) -> Result<
+        (
+            crate::batch::BatchSummary,
+            soroban_sdk::Vec<crate::batch::BatchResult>,
+        ),
+        SLAError,
+    > {
         crate::batch::batch_calculate(&env, &caller, requests)
     }
 
@@ -1259,14 +1303,17 @@ impl SLACalculatorContract {
         // Graceful degradation: validate inputs before processing
         Self::validate_symbol_input(&outage_id, true)?;
         Self::validate_symbol_input(&severity, false)?;
-        if mttr_minutes == 0 {
-            return Err(SLAError::InvalidMTTR);
-        }
         Self::require_not_paused(&env)?; // #27
         Self::require_operator(&env, &caller)?; // #28
 
-        let configs: Map<Symbol, SLAConfig> = env.storage().instance().get(&CONFIG_KEY).ok_or(SLAError::NotInitialized)?;
-        let cfg = configs.get(severity.clone()).ok_or(SLAError::ConfigNotFound)?;
+        let configs: Map<Symbol, SLAConfig> = env
+            .storage()
+            .instance()
+            .get(&CONFIG_KEY)
+            .ok_or(SLAError::NotInitialized)?;
+        let cfg = configs
+            .get(severity.clone())
+            .ok_or(SLAError::ConfigNotFound)?;
         let config_version_hash = Self::compute_config_version_hash(&env, &configs)?;
         let result = Self::compute_result(
             outage_id.clone(),
@@ -1346,7 +1393,7 @@ impl SLACalculatorContract {
     fn compute_sla(_env: &Env, config: &SLAConfig, outage: &OutageInput) -> SlaSimulationResult {
         let threshold = config.threshold_minutes;
         let mttr_minutes = outage.mttr_minutes;
-        
+
         let is_breach = mttr_minutes > threshold;
         let penalty_amount = if is_breach {
             let overtime = (mttr_minutes - threshold) as i128;
@@ -1354,17 +1401,13 @@ impl SLACalculatorContract {
         } else {
             0
         };
-        
+
         // Calculate uptime basis points (10000 bps = 100%) - (mttr / threshold) as percentage in bps
-        let uptime_bps = if threshold == 0 {
-            0
-        } else {
-            (mttr_minutes * 10000) / threshold
-        };
-        
+        let uptime_bps = (mttr_minutes * 10000).checked_div(threshold).unwrap_or(0);
+
         // Map severity to the applied tier
         let applied_tier = Some(outage.severity.clone());
-        
+
         SlaSimulationResult {
             is_breach,
             penalty_amount,
@@ -1483,7 +1526,7 @@ impl SLACalculatorContract {
     /// and contains only valid characters (a-zA-Z0-9_). Returns `InvalidOutageId`
     /// for outage IDs or `MalformedSymbolInput` for other symbols when validation
     /// fails, allowing graceful degradation instead of panicking.
-    fn validate_symbol_input(symbol: &Symbol, is_outage_id: bool) -> Result<(), SLAError> {
+    fn validate_symbol_input(_symbol: &Symbol, _is_outage_id: bool) -> Result<(), SLAError> {
         // Soroban Symbol is natively restricted to valid characters and max length 32.
         Ok(())
     }
@@ -1561,18 +1604,18 @@ impl SLACalculatorContract {
 
         // Cross-severity monotonicity validation
         let severities = Self::canonical_severities(env); // order: critical, high, medium, low
-        
+
         // Get the index of the severity being updated
         let current_index = Self::canonical_severity_index(severity).unwrap();
-        
+
         // Validate against all other severities to maintain proper ordering
         for (i, other_severity) in severities.iter().enumerate() {
             if other_severity == *severity {
                 continue;
             }
-            
+
             let other_config = existing_configs.get(other_severity).unwrap();
-            
+
             // For any severity that comes before the current one (lower index = higher severity)
             if (i as u32) < current_index {
                 // Higher severity should have lower threshold than current
@@ -1626,7 +1669,10 @@ impl SLACalculatorContract {
     }
 
     /// Shared config lookup that borrows env (avoids consuming it).
-    fn compute_config_version_hash(env: &Env, configs: &Map<Symbol, SLAConfig>) -> Result<u64, SLAError> {
+    fn compute_config_version_hash(
+        _env: &Env,
+        configs: &Map<Symbol, SLAConfig>,
+    ) -> Result<u64, SLAError> {
         let severities = [
             symbol_short!("critical"),
             symbol_short!("high"),
@@ -1668,6 +1714,7 @@ impl SLACalculatorContract {
         Ok(hash.wrapping_mul(BASE).wrapping_add(0x9e3779b97f4a7c15u64) % MODULUS)
     }
 
+    #[allow(unused_assignments)]
     fn compute_result_hash_inner(result: &SLAResult) -> u64 {
         const BASE: u64 = 91138233;
         const MODULUS: u64 = (1u64 << 63) - 25;
@@ -1795,11 +1842,11 @@ impl SLACalculatorContract {
             .instance()
             .get(&HISTORY_KEY)
             .unwrap_or_else(|| Vec::new(&env));
-            
+
         let mut total = 0;
         let mut met = 0;
         let mut violated = 0;
-        
+
         for i in 0..history.len() {
             let entry = history.get(i).unwrap();
             total += 1;
@@ -1809,8 +1856,12 @@ impl SLACalculatorContract {
                 violated += 1;
             }
         }
-        
-        Ok(HistorySummary { total, met, violated })
+
+        Ok(HistorySummary {
+            total,
+            met,
+            violated,
+        })
     }
 
     /// Returns the raw log of recent SLA calculations stored on-chain.
