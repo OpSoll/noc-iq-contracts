@@ -193,11 +193,11 @@ pub(crate) fn process_single(
         // Met
         let performance_ratio = (req.mttr_minutes * 100) / threshold;
         let (multiplier, rating) = if performance_ratio < 50 {
-            (200u32, symbol_short!("top"))
+            (cfg.top_tier_multiplier, symbol_short!("top"))
         } else if performance_ratio < 75 {
-            (150u32, symbol_short!("excel"))
+            (cfg.excel_tier_multiplier, symbol_short!("excel"))
         } else {
-            (100u32, symbol_short!("good"))
+            (cfg.good_tier_multiplier, symbol_short!("good"))
         };
 
         let reward = cfg

@@ -29,7 +29,7 @@ mod auth_matrix_tests {
         client.set_config(
             &admin,
             &symbol_short!("high"),
-            &SLAConfig { threshold_minutes: 30, penalty_per_minute: 50, reward_base: 500 },
+            &SLAConfig { threshold_minutes: 30, penalty_per_minute: 50, reward_base: 500 , top_tier_multiplier: 200, excel_tier_multiplier: 150, good_tier_multiplier: 100},
         );
     }
 
