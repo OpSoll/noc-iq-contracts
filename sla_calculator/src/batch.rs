@@ -1,7 +1,6 @@
+use soroban_sdk::{contracttype, symbol_short, Env, Symbol};
 
-use soroban_sdk::{symbol_short, contracttype, Env, Symbol};
-
-use crate::{SLAResult, SLAError, SLAConfig, OPERATOR_KEY, CONFIG_KEY};
+use crate::{SLAConfig, SLAError, SLAResult, CONFIG_KEY, OPERATOR_KEY};
 
 // -----------------------------------------------------------------------
 // Types
@@ -83,7 +82,11 @@ pub fn batch_calculate(
     }
 
     // Check not paused
-    let paused: bool = env.storage().instance().get(&symbol_short!("PAUSED")).unwrap_or(false);
+    let paused: bool = env
+        .storage()
+        .instance()
+        .get(&symbol_short!("PAUSED"))
+        .unwrap_or(false);
     if paused {
         return Err(SLAError::ContractPaused);
     }
@@ -104,7 +107,7 @@ pub fn batch_calculate(
         let req = requests.get(i).unwrap();
 
         // Try to calculate
-        match process_single(&env, &configs, &req) {
+        match process_single(env, &configs, &req) {
             Ok(res) => {
                 succeeded = succeeded.saturating_add(1);
                 if res.status == symbol_short!("viol") {
@@ -234,7 +237,7 @@ pub fn validate_batch(
     env: &Env,
     requests: &soroban_sdk::Vec<BatchRequest>,
 ) -> Result<u32, SLAError> {
-    if requests.len() == 0 {
+    if requests.is_empty() {
         return Err(SLAError::ThresholdOutOfBounds);
     }
 

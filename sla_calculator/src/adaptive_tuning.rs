@@ -1,7 +1,6 @@
-
 use soroban_sdk::{symbol_short, Address, Env, Symbol};
 
-use crate::{SLAError, ADMIN_KEY, STATS_KEY, SLAStats};
+use crate::{SLAError, SLAStats, ADMIN_KEY, STATS_KEY};
 
 // -----------------------------------------------------------------------
 // Storage keys
@@ -107,17 +106,17 @@ pub fn set_tuning(
 pub fn disable_tuning(env: &Env, caller: &Address) -> Result<(), SLAError> {
     require_admin(env, caller)?;
 
-    let mut config: TuningConfig = env
-        .storage()
-        .instance()
-        .get(&TUNING_KEY)
-        .unwrap_or(TuningConfig {
-            target_compliance_bps: 9500,
-            adjustment_step_bps: 100,
-            max_adjustment_bps: 500,
-            evaluation_window: 86400,
-            enabled: false,
-        });
+    let mut config: TuningConfig =
+        env.storage()
+            .instance()
+            .get(&TUNING_KEY)
+            .unwrap_or(TuningConfig {
+                target_compliance_bps: 9500,
+                adjustment_step_bps: 100,
+                max_adjustment_bps: 500,
+                evaluation_window: 86400,
+                enabled: false,
+            });
 
     config.enabled = false;
     env.storage().instance().set(&TUNING_KEY, &config);
@@ -126,9 +125,7 @@ pub fn disable_tuning(env: &Env, caller: &Address) -> Result<(), SLAError> {
 }
 
 /// Generate tuning recommendation based on current stats.
-pub fn get_tuning_recommendation(
-    env: &Env,
-) -> Result<TuningRecommendation, SLAError> {
+pub fn get_tuning_recommendation(env: &Env) -> Result<TuningRecommendation, SLAError> {
     let config: TuningConfig = env
         .storage()
         .instance()
@@ -155,7 +152,7 @@ pub fn get_tuning_recommendation(
     // Calculate current compliance rate
     let current_compliance_bps = if stats.total_calculations > 0 {
         let met_count = stats.total_calculations - stats.total_violations;
-        ((met_count as u64 * 10000) / stats.total_calculations as u64) as u32
+        ((met_count * 10000) / stats.total_calculations) as u32
     } else {
         0
     };
@@ -198,9 +195,7 @@ pub fn get_tuning_recommendation(
 }
 
 /// Get the tuning configuration.
-pub fn get_tuning_config(
-    env: &Env,
-) -> Result<TuningConfig, SLAError> {
+pub fn get_tuning_config(env: &Env) -> Result<TuningConfig, SLAError> {
     Ok(env
         .storage()
         .instance()
