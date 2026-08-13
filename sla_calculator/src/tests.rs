@@ -1231,13 +1231,7 @@ fn test_config_version_hash_stable_after_same_value_write() {
     assert_eq!(before, after);
 }
 
-#[test]
-fn test_config_version_hash_collision_resistance() {
-    let (_env, client, actors) = setup();
 
-    // Get initial hash
-    let initial_hash = client.get_config_version_hash();
-}
 
 // ============================================================
 // Batch Size Boundary Enforcement Tests
@@ -1321,6 +1315,11 @@ fn test_batch_with_duplicate_outage_ids_rejected() {
     });
     client.batch_calculate(&actors.operator, &requests);
 }
+
+#[test]
+fn test_config_version_hash_collision_resistance() {
+    let (_env, client, actors) = setup();
+    let initial_hash = client.get_config_version_hash();
 
     // Create a different config with different field values but same total sum
     // Original critical: threshold=15, penalty=100, reward=750 (sum=865)

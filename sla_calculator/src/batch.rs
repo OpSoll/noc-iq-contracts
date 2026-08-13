@@ -1,5 +1,5 @@
 
-use soroban_sdk::{symbol_short, Env, Symbol};
+use soroban_sdk::{symbol_short, contracttype, Env, Symbol};
 
 use crate::{SLAResult, SLAError, SLAConfig, OPERATOR_KEY, CONFIG_KEY};
 
@@ -8,7 +8,8 @@ use crate::{SLAResult, SLAError, SLAConfig, OPERATOR_KEY, CONFIG_KEY};
 // -----------------------------------------------------------------------
 
 /// Batch calculation request item.
-#[soroban_sdk::contracttype]
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BatchRequest {
     /// Unique identifier for this outage.
     pub outage_id: Symbol,
@@ -19,20 +20,22 @@ pub struct BatchRequest {
 }
 
 /// Batch calculation result item.
-#[soroban_sdk::contracttype]
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BatchResult {
     /// The outage ID.
     pub outage_id: Symbol,
     /// Whether calculation succeeded.
     pub success: bool,
-    /// The SLA result (if successful).
-    pub result: Option<SLAResult>,
+    /// The SLA result (if successful, empty vec if failed).
+    pub result: soroban_sdk::Vec<SLAResult>,
     /// Error message (if failed).
     pub error: Option<Symbol>,
 }
 
 /// Batch calculation summary.
-#[soroban_sdk::contracttype]
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BatchSummary {
     /// Total items in batch.
     pub total: u32,
@@ -102,17 +105,19 @@ pub fn batch_calculate(
 
         // Try to calculate
         match process_single(&env, &configs, &req) {
-            Ok(result) => {
+            Ok(res) => {
                 succeeded = succeeded.saturating_add(1);
-                if result.status == symbol_short!("viol") {
-                    total_penalties = total_penalties.saturating_add(result.amount);
+                if res.status == symbol_short!("viol") {
+                    total_penalties = total_penalties.saturating_add(res.amount);
                 } else {
-                    total_rewards = total_rewards.saturating_add(result.amount);
+                    total_rewards = total_rewards.saturating_add(res.amount);
                 }
+                let mut res_vec = soroban_sdk::Vec::new(env);
+                res_vec.push_back(res);
                 results.push_back(BatchResult {
                     outage_id: req.outage_id.clone(),
                     success: true,
-                    result: Some(result),
+                    result: res_vec,
                     error: None,
                 });
             }
@@ -127,7 +132,7 @@ pub fn batch_calculate(
                 results.push_back(BatchResult {
                     outage_id: req.outage_id.clone(),
                     success: false,
-                    result: None,
+                    result: soroban_sdk::Vec::new(env),
                     error: Some(error_msg),
                 });
             }

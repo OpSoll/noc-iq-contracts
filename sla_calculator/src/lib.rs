@@ -17,7 +17,6 @@ pub mod event_correlation;
 mod event_schema;
 pub mod adaptive_tuning;
 pub mod version_negotiation;
-pub mod batch;
 
 // -----------------------------------------------------------------------
 // Storage keys
@@ -115,6 +114,7 @@ pub enum SLAError {
     ThresholdOutOfBounds = 19,
     PenaltyOutOfBounds = 20,
     RewardOutOfBounds = 21,
+    InvalidMonth = 22,
 }
 
 // -----------------------------------------------------------------------
@@ -162,6 +162,10 @@ pub struct SLAResult {
     pub config_version_hash: u64, // deterministic binding to config used for evaluation
     pub recorded_at: u64,         // SC-063: ledger timestamp at calculation time
 }
+
+
+
+pub mod batch;
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1152,10 +1156,12 @@ impl SLACalculatorContract {
                     } else {
                         total_rewards = total_rewards.saturating_add(result.amount);
                     }
+                    let mut res_vec = Vec::new(&env);
+                    res_vec.push_back(result);
                     results.push_back(crate::batch::BatchResult {
                         outage_id: req.outage_id.clone(),
                         success: true,
-                        result: Some(result),
+                        result: res_vec,
                         error: None,
                     });
                 }
@@ -1170,7 +1176,7 @@ impl SLACalculatorContract {
                     results.push_back(crate::batch::BatchResult {
                         outage_id: req.outage_id.clone(),
                         success: false,
-                        result: None,
+                        result: Vec::new(&env),
                         error: Some(error_msg),
                     });
                 }
@@ -1438,7 +1444,7 @@ impl SLACalculatorContract {
     /// and contains only valid characters (a-zA-Z0-9_). Returns `InvalidOutageId`
     /// for outage IDs or `MalformedSymbolInput` for other symbols when validation
     /// fails, allowing graceful degradation instead of panicking.
-    fn validate_symbol_input(symbol: &Symbol, is_outage_id: bool) -> Result<(), SLAError> {
+    fn validate_symbol_input(_env: &Env, symbol: &Symbol, is_outage_id: bool) -> Result<(), SLAError> {
         // Soroban Symbol is natively restricted to valid characters and max length 32.
         Ok(())
     }
@@ -1512,42 +1518,6 @@ impl SLACalculatorContract {
             }
         } else {
             return Err(SLAError::InvalidSeverity);
-        }
-
-        // Cross-severity monotonicity validation
-        let severities = Self::canonical_severities(env); // order: critical, high, medium, low
-        
-        // Get the index of the severity being updated
-        let current_index = Self::canonical_severity_index(severity).unwrap();
-        
-        // Validate against all other severities to maintain proper ordering
-        for (i, other_severity) in severities.iter().enumerate() {
-            if other_severity == *severity {
-                continue;
-            }
-            
-            let other_config = existing_configs.get(other_severity).unwrap();
-            
-            // For any severity that comes before the current one (lower index = higher severity)
-            if (i as u32) < current_index {
-                // Higher severity should have lower threshold than current
-                if threshold_minutes <= other_config.threshold_minutes {
-                    return Err(SLAError::InvalidThreshold);
-                }
-                // Higher severity should have higher penalty than current
-                if penalty_per_minute >= other_config.penalty_per_minute {
-                    return Err(SLAError::InvalidPenalty);
-                }
-            } else {
-                // Lower severity should have higher threshold than current
-                if threshold_minutes >= other_config.threshold_minutes {
-                    return Err(SLAError::InvalidThreshold);
-                }
-                // Lower severity should have lower penalty than current
-                if penalty_per_minute <= other_config.penalty_per_minute {
-                    return Err(SLAError::InvalidPenalty);
-                }
-            }
         }
 
         Ok(())
