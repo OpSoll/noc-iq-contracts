@@ -8296,7 +8296,10 @@ fn test_sla_error_try_from_rejects_non_contract_errors() {
     // Use an unknown contract code that doesn't map to any SLAError variant.
     let unknown_contract = Error::from_contract_error(999);
     let result: Result<SLAError, _> = unknown_contract.try_into();
-    assert!(result.is_err(), "Unknown contract error code must not convert to SLAError");
+    assert!(
+        result.is_err(),
+        "Unknown contract error code must not convert to SLAError"
+    );
 }
 
 #[test]
