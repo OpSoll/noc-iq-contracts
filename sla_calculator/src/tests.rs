@@ -8182,3 +8182,91 @@ fn test_257_hash_differs_across_all_four_severities() {
     let h4 = client.get_config_version_hash();
     assert_ne!(h3, h4);
 }
+
+// ============================================================
+// #611 – CPU instruction budget benchmark for calculate_sla
+// ============================================================
+
+#[test]
+fn test_calculate_sla_cpu_budget() {
+    let (env, client, actors) = setup();
+
+    env.budget().reset_tracker();
+
+    let _ = client.calculate_sla(
+        &actors.operator,
+        &symbol_short!("bench_out"),
+        &symbol_short!("high"),
+        &15,
+    );
+
+    let cpu = env.budget().cpu_instruction_cost();
+    assert!(
+        cpu < 1_000_000,
+        "calculate_sla consumed {} CPU instructions, expected < 1,000,000",
+        cpu
+    );
+}
+
+#[test]
+fn test_calculate_sla_memory_budget() {
+    let (env, client, actors) = setup();
+
+    env.budget().reset_tracker();
+
+    let _ = client.calculate_sla(
+        &actors.operator,
+        &symbol_short!("mem_out"),
+        &symbol_short!("high"),
+        &15,
+    );
+
+    let mem = env.budget().memory_bytes_cost();
+    assert!(
+        mem < 1_000_000,
+        "calculate_sla consumed {} bytes of memory, expected < 1,000,000",
+        mem
+    );
+}
+
+#[test]
+fn test_calculate_sla_cpu_budget_low_severity() {
+    let (env, client, actors) = setup();
+
+    env.budget().reset_tracker();
+
+    let _ = client.calculate_sla(
+        &actors.operator,
+        &symbol_short!("cpu_lo"),
+        &symbol_short!("low"),
+        &15,
+    );
+
+    let cpu = env.budget().cpu_instruction_cost();
+    assert!(
+        cpu < 1_000_000,
+        "calculate_sla for low severity consumed {} CPU instructions, expected < 1,000,000",
+        cpu
+    );
+}
+
+#[test]
+fn test_calculate_sla_cpu_budget_critical_severity() {
+    let (env, client, actors) = setup();
+
+    env.budget().reset_tracker();
+
+    let _ = client.calculate_sla(
+        &actors.operator,
+        &symbol_short!("cpu_cr"),
+        &symbol_short!("critical"),
+        &15,
+    );
+
+    let cpu = env.budget().cpu_instruction_cost();
+    assert!(
+        cpu < 1_000_000,
+        "calculate_sla for critical severity consumed {} CPU instructions, expected < 1,000,000",
+        cpu
+    );
+}
