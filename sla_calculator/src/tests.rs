@@ -8182,3 +8182,103 @@ fn test_257_hash_differs_across_all_four_severities() {
     let h4 = client.get_config_version_hash();
     assert_ne!(h3, h4);
 }
+
+// ============================================================
+// #603 – InvalidRewardAmount error code variant
+// ============================================================
+
+#[test]
+fn test_invalid_reward_amount_error_code_has_correct_discriminant() {
+    assert_eq!(SLAError::InvalidRewardAmount as u32, 15);
+}
+
+#[test]
+fn test_invalid_reward_amount_is_distinct_from_adjacent_error_codes() {
+    assert_ne!(
+        SLAError::InvalidRewardAmount as u32,
+        SLAError::InvalidPenaltyAmount as u32,
+        "InvalidRewardAmount (15) and InvalidPenaltyAmount (14) must be distinct"
+    );
+    assert_ne!(
+        SLAError::InvalidRewardAmount as u32,
+        SLAError::InvalidOutageId as u32,
+        "InvalidRewardAmount (15) and InvalidOutageId (16) must be distinct"
+    );
+    assert_ne!(
+        SLAError::InvalidRewardAmount as u32,
+        SLAError::RewardOutOfBounds as u32,
+        "InvalidRewardAmount (15) and RewardOutOfBounds (21) must be distinct"
+    );
+    assert_ne!(
+        SLAError::InvalidRewardAmount as u32,
+        SLAError::InvalidReward as u32,
+        "InvalidRewardAmount (15) and InvalidReward (10) must be distinct"
+    );
+}
+
+#[test]
+fn test_invalid_reward_amount_match_and_conversion() {
+    let error = SLAError::InvalidRewardAmount;
+    let code = error as u32;
+    assert_eq!(code, 15);
+
+    // Verify roundtrip: discriminant → variant → discriminant
+    let roundtripped = match code {
+        15 => SLAError::InvalidRewardAmount,
+        _ => panic!("Unexpected error code"),
+    };
+    assert_eq!(roundtripped as u32, 15);
+    assert_eq!(roundtripped, SLAError::InvalidRewardAmount);
+}
+
+#[test]
+fn test_invalid_reward_amount_error_is_used_in_reward_calculation() {
+    let (_env, client, actors) = setup();
+
+    // Normal reward calculation succeeds (not overflow, so no InvalidRewardAmount)
+    let result = client.calculate_sla(
+        &actors.operator,
+        &symbol_short!("REW001"),
+        &symbol_short!("critical"),
+        &5,
+    );
+    assert_eq!(result.status, symbol_short!("met"));
+    assert_eq!(result.payment_type, symbol_short!("rew"));
+    assert!(result.amount > 0, "Reward amount must be positive for met SLA");
+}
+
+#[test]
+fn test_invalid_reward_amount_does_not_appear_for_valid_calculations() {
+    let (env, client, actors) = setup();
+
+    // All default severity tiers should produce valid reward calculations
+    let severities = [
+        symbol_short!("critical"),
+        symbol_short!("high"),
+        symbol_short!("medium"),
+        symbol_short!("low"),
+    ];
+
+    for (idx, severity) in severities.iter().enumerate() {
+        let cfg = client.get_config(severity);
+        let mttr = cfg.threshold_minutes / 2; // Well under threshold → met
+        let outage_id = symbol(&env, &format!("REWCHK{}", idx));
+
+        let result = client.calculate_sla(
+            &actors.operator,
+            &outage_id,
+            severity,
+            &mttr,
+        );
+        assert_eq!(
+            result.status, symbol_short!("met"),
+            "Severity {} should produce met SLA",
+            idx
+        );
+        assert!(
+            result.amount > 0,
+            "Severity {} should produce positive reward",
+            idx
+        );
+    }
+}
