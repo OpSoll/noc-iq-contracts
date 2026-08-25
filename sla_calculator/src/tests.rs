@@ -8244,7 +8244,10 @@ fn test_invalid_reward_amount_error_is_used_in_reward_calculation() {
     );
     assert_eq!(result.status, symbol_short!("met"));
     assert_eq!(result.payment_type, symbol_short!("rew"));
-    assert!(result.amount > 0, "Reward amount must be positive for met SLA");
+    assert!(
+        result.amount > 0,
+        "Reward amount must be positive for met SLA"
+    );
 }
 
 #[test]
@@ -8264,14 +8267,10 @@ fn test_invalid_reward_amount_does_not_appear_for_valid_calculations() {
         let mttr = cfg.threshold_minutes / 2; // Well under threshold → met
         let outage_id = symbol(&env, &format!("REWCHK{}", idx));
 
-        let result = client.calculate_sla(
-            &actors.operator,
-            &outage_id,
-            severity,
-            &mttr,
-        );
+        let result = client.calculate_sla(&actors.operator, &outage_id, severity, &mttr);
         assert_eq!(
-            result.status, symbol_short!("met"),
+            result.status,
+            symbol_short!("met"),
             "Severity {} should produce met SLA",
             idx
         );
