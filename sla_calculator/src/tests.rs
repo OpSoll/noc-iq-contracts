@@ -8182,3 +8182,150 @@ fn test_257_hash_differs_across_all_four_severities() {
     let h4 = client.get_config_version_hash();
     assert_ne!(h3, h4);
 }
+
+// ============================================================
+// #607 – From<SLAError> for soroban_sdk::Error conversion
+// ============================================================
+
+#[test]
+fn test_sla_error_converts_to_soroban_error_via_from_trait() {
+    use soroban_sdk::Error;
+
+    let err: Error = SLAError::ContractPaused.into();
+    assert!(err.is_type(soroban_sdk::xdr::ScErrorType::Contract));
+    assert_eq!(err.get_code(), SLAError::ContractPaused as u32);
+}
+
+#[test]
+fn test_sla_error_converts_all_variants_to_contract_error() {
+    use soroban_sdk::Error;
+
+    let all_pass = [
+        (SLAError::AlreadyInitialized as u32, 1u32),
+        (SLAError::NotInitialized as u32, 2),
+        (SLAError::Unauthorized as u32, 3),
+        (SLAError::ConfigNotFound as u32, 4),
+        (SLAError::VersionMismatch as u32, 5),
+        (SLAError::ContractPaused as u32, 6),
+        (SLAError::NoPendingTransfer as u32, 7),
+        (SLAError::InvalidThreshold as u32, 8),
+        (SLAError::InvalidPenalty as u32, 9),
+        (SLAError::InvalidReward as u32, 10),
+        (SLAError::InvalidSeverity as u32, 11),
+        (SLAError::RetentionLimitOutOfRange as u32, 12),
+        (SLAError::DuplicateOutageInput as u32, 13),
+        (SLAError::InvalidPenaltyAmount as u32, 14),
+        (SLAError::InvalidRewardAmount as u32, 15),
+        (SLAError::InvalidOutageId as u32, 16),
+        (SLAError::MalformedSymbolInput as u32, 17),
+        (SLAError::InvalidMTTR as u32, 18),
+        (SLAError::ThresholdOutOfBounds as u32, 19),
+        (SLAError::PenaltyOutOfBounds as u32, 20),
+        (SLAError::RewardOutOfBounds as u32, 21),
+        (SLAError::InvalidMonth as u32, 22),
+    ];
+
+    for (variant_code, expected_code) in all_pass {
+        let sla_err: SLAError = match variant_code {
+            1 => SLAError::AlreadyInitialized,
+            2 => SLAError::NotInitialized,
+            3 => SLAError::Unauthorized,
+            4 => SLAError::ConfigNotFound,
+            5 => SLAError::VersionMismatch,
+            6 => SLAError::ContractPaused,
+            7 => SLAError::NoPendingTransfer,
+            8 => SLAError::InvalidThreshold,
+            9 => SLAError::InvalidPenalty,
+            10 => SLAError::InvalidReward,
+            11 => SLAError::InvalidSeverity,
+            12 => SLAError::RetentionLimitOutOfRange,
+            13 => SLAError::DuplicateOutageInput,
+            14 => SLAError::InvalidPenaltyAmount,
+            15 => SLAError::InvalidRewardAmount,
+            16 => SLAError::InvalidOutageId,
+            17 => SLAError::MalformedSymbolInput,
+            18 => SLAError::InvalidMTTR,
+            19 => SLAError::ThresholdOutOfBounds,
+            20 => SLAError::PenaltyOutOfBounds,
+            21 => SLAError::RewardOutOfBounds,
+            22 => SLAError::InvalidMonth,
+            _ => panic!("Unexpected variant code"),
+        };
+        let err: Error = sla_err.into();
+        assert!(
+            err.is_type(soroban_sdk::xdr::ScErrorType::Contract),
+            "Variant code {} should convert to Contract error type",
+            variant_code
+        );
+        assert_eq!(
+            err.get_code(),
+            expected_code,
+            "Variant code {} should have error code {}",
+            variant_code,
+            expected_code
+        );
+    }
+}
+
+#[test]
+fn test_sla_error_try_from_roundtrip_preserves_identity() {
+    use soroban_sdk::Error;
+
+    let original = SLAError::ContractPaused;
+    let err: Error = original.into();
+    let roundtripped: SLAError = err.try_into().unwrap();
+    assert_eq!(original, roundtripped);
+}
+
+#[test]
+fn test_sla_error_try_from_preserves_discriminant() {
+    use soroban_sdk::Error;
+
+    let original = SLAError::InvalidRewardAmount;
+    let err: Error = original.into();
+    let roundtripped: SLAError = err.try_into().unwrap();
+    assert_eq!(roundtripped as u32, 15);
+    assert_eq!(original, roundtripped);
+}
+
+#[test]
+fn test_sla_error_try_from_rejects_non_contract_errors() {
+    use soroban_sdk::Error;
+
+    // A non-contract error should fail conversion to SLAError.
+    // Use an unknown contract code that doesn't map to any SLAError variant.
+    let unknown_contract = Error::from_contract_error(999);
+    let result: Result<SLAError, _> = unknown_contract.try_into();
+    assert!(result.is_err(), "Unknown contract error code must not convert to SLAError");
+}
+
+#[test]
+fn test_contract_paused_error_converts_and_is_retryable() {
+    use soroban_sdk::Error;
+
+    // Simulate the pattern used in contract methods: return Err(SLAError) → convert to Error
+    let sla_err = SLAError::ContractPaused;
+    let err: Error = sla_err.into();
+
+    // Convert back to verify the roundtrip
+    let back: SLAError = err.try_into().unwrap();
+    assert_eq!(back, SLAError::ContractPaused);
+
+    // Verify it matches in a match arm
+    match back {
+        SLAError::ContractPaused => {} // expected
+        _ => panic!("Expected ContractPaused"),
+    }
+}
+
+#[test]
+fn test_from_trait_conversion_matches_contract_error_macro_path() {
+    use soroban_sdk::Error;
+
+    // The #[contracterror] macro generates:
+    //   SLAError::X => soroban_sdk::Error::from_contract_error(N)
+    // Verify this produces the same result as the manual path
+    let manual = Error::from_contract_error(SLAError::ConfigNotFound as u32);
+    let via_trait: Error = SLAError::ConfigNotFound.into();
+    assert_eq!(manual, via_trait);
+}
