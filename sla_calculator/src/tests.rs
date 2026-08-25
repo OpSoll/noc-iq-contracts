@@ -8182,3 +8182,27 @@ fn test_257_hash_differs_across_all_four_severities() {
     let h4 = client.get_config_version_hash();
     assert_ne!(h3, h4);
 }
+
+// ============================================================
+// #623 – Paused contract rejects calculate_sla with ContractPaused
+// ============================================================
+
+#[test]
+#[should_panic(expected = "Contract, #6")]
+fn test_paused_contract_rejects_calculate() {
+    let (env, client, actors) = setup();
+
+    // Pause the contract
+    client.pause(
+        &actors.admin,
+        &soroban_sdk::String::from_str(&env, "maintenance window"),
+    );
+
+    // Attempting calculate_sla while paused must fail with ContractPaused (error code 6)
+    let _ = client.calculate_sla(
+        &actors.operator,
+        &symbol_short!("INC_pause"),
+        &symbol_short!("high"),
+        &25,
+    );
+}
