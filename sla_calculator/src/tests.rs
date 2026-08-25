@@ -8182,3 +8182,88 @@ fn test_257_hash_differs_across_all_four_severities() {
     let h4 = client.get_config_version_hash();
     assert_ne!(h3, h4);
 }
+
+// ============================================================
+// #619 – Proptest: MTTR monotonicity in penalty calculation
+// ============================================================
+
+#[cfg(test)]
+mod proptests {
+    use proptest::prelude::*;
+    use soroban_sdk::testutils::Address as _;
+
+    use super::*;
+    use crate::{symbol_short, SLACalculatorContract};
+
+    fn arb_severity() -> impl Strategy<Value = soroban_sdk::Symbol> {
+        prop_oneof![
+            Just(symbol_short!("critical")),
+            Just(symbol_short!("high")),
+            Just(symbol_short!("medium")),
+            Just(symbol_short!("low")),
+        ]
+    }
+
+    proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(1000))]
+
+        #[test]
+        fn prop_mttr_monotonicity_penalty(
+            severity in arb_severity(),
+            mttr_a in 1u32..5000u32,
+            delta in 1u32..5000u32,
+        ) {
+            let env = Env::default();
+            let cid = env.register_contract(None, SLACalculatorContract);
+            let client = SLACalculatorContractClient::new(&env, &cid);
+
+            let admin = Address::generate(&env);
+            let operator = Address::generate(&env);
+            client.initialize(&admin, &operator);
+
+            let config = client.get_config(&severity);
+            let threshold = config.threshold_minutes;
+
+            // Ensure both MTTR values are in the violated range (above threshold)
+            let mttr_a = core::cmp::max(mttr_a, threshold + 1);
+            let mttr_b = mttr_a.saturating_add(delta);
+
+            // Skip if mttr_b would overflow u32
+            if mttr_b < mttr_a {
+                return Ok(());
+            }
+
+            let result_a = client.calculate_sla_view(
+                &symbol_short!("mon_a"),
+                &severity,
+                &mttr_a,
+            );
+            let result_b = client.calculate_sla_view(
+                &symbol_short!("mon_b"),
+                &severity,
+                &mttr_b,
+            );
+
+            // Both must be violated
+            prop_assert_eq!(result_a.status, symbol_short!("viol"));
+            prop_assert_eq!(result_b.status, symbol_short!("viol"));
+
+            // Penalty amounts (amount is negative, so larger absolute value = more penalty)
+            // longer MTTR => amount(mttr_b) <= amount(mttr_a) (more negative or equal)
+            prop_assert!(
+                result_b.amount <= result_a.amount,
+                "MTTR monotonicity violated: amount({}) = {} > amount({}) = {}",
+                mttr_b, result_b.amount,
+                mttr_a, result_a.amount,
+            );
+
+            // Absolute penalty must be monotonic: |amount(mttr_b)| >= |amount(mttr_a)|
+            prop_assert!(
+                result_b.amount.abs() >= result_a.amount.abs(),
+                "Absolute penalty monotonicity violated: |amount({})| = {} < |amount({})| = {}",
+                mttr_b, result_b.amount.abs(),
+                mttr_a, result_a.amount.abs(),
+            );
+        }
+    }
+}
