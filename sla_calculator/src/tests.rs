@@ -956,12 +956,12 @@ fn test_high_but_safe_reward_passes() {
         &100,
     );
 
-    // mttr=0 → top-tier reward = 100000 * 200 / 100 = 200000
+    // mttr=1 → top-tier reward = 100000 * 200 / 100 = 200000
     let result = client.calculate_sla(
         &actors.operator,
         &symbol_short!("SAFE001"),
         &symbol_short!("critical"),
-        &0,
+        &1,
     );
     assert_eq!(
         result.status,
@@ -1487,6 +1487,7 @@ fn test_empty_batch_rejected() {
     let empty_requests = Vec::<BatchRequest>::new(&env);
     let result = client.try_batch_calculate(&actors.operator, &empty_requests);
     assert!(result.is_err());
+    assert_eq!(result.unwrap_err().unwrap(), SLAError::ThresholdOutOfBounds);
 }
 
 #[test]
@@ -1503,6 +1504,7 @@ fn test_oversized_batch_rejected() {
     }
     let result = client.try_batch_calculate(&actors.operator, &requests);
     assert!(result.is_err());
+    assert_eq!(result.unwrap_err().unwrap(), SLAError::ThresholdOutOfBounds);
 }
 
 #[test]
@@ -1557,6 +1559,69 @@ fn test_batch_with_duplicate_outage_ids_rejected() {
     });
     let result = client.try_batch_calculate(&actors.operator, &requests);
     assert!(result.is_err());
+    assert_eq!(result.unwrap_err().unwrap(), SLAError::DuplicateOutageInput);
+}
+
+#[test]
+fn test_batch_summary_struct() {
+    let (env, client, actors) = setup();
+    let mut requests = Vec::<BatchRequest>::new(&env);
+    requests.push_back(BatchRequest {
+        outage_id: symbol_short!("MET01"),
+        severity: symbol_short!("high"),
+        mttr_minutes: 10,
+    });
+    requests.push_back(BatchRequest {
+        outage_id: symbol_short!("VIOL1"),
+        severity: symbol_short!("critical"),
+        mttr_minutes: 20,
+    });
+    let result = client.try_batch_calculate(&actors.operator, &requests);
+    assert!(result.is_ok());
+    let (summary, results) = result.unwrap().unwrap();
+    assert_eq!(summary.total, 2);
+    assert_eq!(summary.succeeded, 2);
+    assert_eq!(summary.failed, 0);
+    assert_eq!(summary.total_rewards, 1500);
+    assert_eq!(summary.total_penalties, -500);
+    assert_eq!(results.len(), 2);
+    assert!(results.get(0).unwrap().success);
+    assert!(results.get(1).unwrap().success);
+}
+
+#[test]
+fn test_batch_summary_struct_fields() {
+    let (env, client, actors) = setup();
+    let mut requests = Vec::<BatchRequest>::new(&env);
+    requests.push_back(BatchRequest {
+        outage_id: symbol(&env, "B1"),
+        severity: symbol_short!("high"),
+        mttr_minutes: 10,
+    });
+    requests.push_back(BatchRequest {
+        outage_id: symbol(&env, "B2"),
+        severity: symbol_short!("high"),
+        mttr_minutes: 60,
+    });
+    let (summary, results) = client.batch_calculate(&actors.operator, &requests);
+    assert_eq!(summary.total, 2);
+    assert_eq!(summary.succeeded, 2);
+    assert_eq!(summary.failed, 0);
+    assert_eq!(results.len(), 2);
+}
+
+#[test]
+fn test_batch_view_only_no_persist() {
+    let (env, client, _actors) = setup();
+    let mut requests = Vec::<BatchRequest>::new(&env);
+    requests.push_back(BatchRequest {
+        outage_id: symbol(&env, "V1"),
+        severity: symbol_short!("medium"),
+        mttr_minutes: 30,
+    });
+    let _ = client.batch_calculate_view(&requests);
+    let history = client.get_history();
+    assert_eq!(history.len(), 0);
 }
 
 #[test]
@@ -8184,6 +8249,171 @@ fn test_257_hash_differs_across_all_four_severities() {
 }
 
 // ============================================================
+// #593 – Standardized event topics structure verification
+// ============================================================
+
+#[test]
+fn test_event_topics_follow_three_tuple_format() {
+    let (env, client, actors) = setup();
+
+    let _result = client.calculate_sla(
+        &actors.operator,
+        &symbol_short!("OUT01"),
+        &symbol_short!("high"),
+        &10,
+    );
+
+    let events = env.events().all();
+    let mut found_sla_calc = false;
+    for i in 0..events.len() {
+        let (_, topics, _) = events.get(i).unwrap();
+        let t0: Symbol = topics.get(0).unwrap().try_into_val(&env).unwrap();
+        if t0 == symbol_short!("sla_calc") {
+            found_sla_calc = true;
+            assert_eq!(topics.len(), 3, "sla_calc must have exactly 3 topic elements");
+            let t1: Symbol = topics.get(1).unwrap().try_into_val(&env).unwrap();
+            assert_eq!(t1, EVENT_VERSION);
+        }
+    }
+    assert!(found_sla_calc, "sla_calc event must be emitted");
+}
+
+// ============================================================
+// #594 – SLA violation event emission
+// ============================================================
+
+#[test]
+fn test_sla_violated_event_emitted_on_breach() {
+    let (env, client, actors) = setup();
+    let result = client.calculate_sla(
+        &actors.operator,
+        &symbol_short!("OUT_V1"),
+        &symbol_short!("high"),
+        &60,
+    );
+    assert_eq!(result.status, symbol_short!("viol"));
+
+    let events = env.events().all();
+    let mut found_viol = false;
+    for i in 0..events.len() {
+        let (_, topics, data) = events.get(i).unwrap();
+        let t0: Symbol = topics.get(0).unwrap().try_into_val(&env).unwrap();
+        if t0 == symbol_short!("sla_viol") {
+            found_viol = true;
+            let t1: Symbol = topics.get(1).unwrap().try_into_val(&env).unwrap();
+            assert_eq!(t1, EVENT_VERSION);
+            let t2: Symbol = topics.get(2).unwrap().try_into_val(&env).unwrap();
+            assert_eq!(t2, symbol_short!("OUT_V1"));
+            let payload: (u32, u32, i128) = data.try_into_val(&env).unwrap();
+            assert!(payload.2 < 0, "violation amount must be negative");
+        }
+    }
+    assert!(found_viol, "sla_viol event must be emitted for breach");
+}
+
+// ============================================================
+// #595 – SLA met event emission
+// ============================================================
+
+#[test]
+fn test_sla_met_event_emitted_when_met() {
+    let (env, client, actors) = setup();
+    let result = client.calculate_sla(
+        &actors.operator,
+        &symbol_short!("OUT_M1"),
+        &symbol_short!("high"),
+        &10,
+    );
+    assert_eq!(result.status, symbol_short!("met"));
+
+    let events = env.events().all();
+    let mut found_met = false;
+    for i in 0..events.len() {
+        let (_, topics, data) = events.get(i).unwrap();
+        let t0: Symbol = topics.get(0).unwrap().try_into_val(&env).unwrap();
+        if t0 == symbol_short!("sla_met") {
+            found_met = true;
+            let t1: Symbol = topics.get(1).unwrap().try_into_val(&env).unwrap();
+            assert_eq!(t1, EVENT_VERSION);
+            let t2: Symbol = topics.get(2).unwrap().try_into_val(&env).unwrap();
+            assert_eq!(t2, symbol_short!("OUT_M1"));
+            let payload: (u32, u32, i128) = data.try_into_val(&env).unwrap();
+            assert!(payload.2 > 0, "reward amount must be positive");
+        }
+    }
+    assert!(found_met, "sla_met event must be emitted when SLA is met");
+}
+
+// ============================================================
+// #596 – Error code discriminant mapping
+// ============================================================
+
+#[test]
+fn test_error_code_discriminants_match_expected_values() {
+    assert_eq!(SLAError::AlreadyInitialized as u32, 1);
+    assert_eq!(SLAError::NotInitialized as u32, 2);
+    assert_eq!(SLAError::Unauthorized as u32, 3);
+    assert_eq!(SLAError::ConfigNotFound as u32, 4);
+    assert_eq!(SLAError::VersionMismatch as u32, 5);
+    assert_eq!(SLAError::ContractPaused as u32, 6);
+    assert_eq!(SLAError::NoPendingTransfer as u32, 7);
+    assert_eq!(SLAError::InvalidThreshold as u32, 8);
+    assert_eq!(SLAError::InvalidPenalty as u32, 9);
+    assert_eq!(SLAError::InvalidReward as u32, 10);
+    assert_eq!(SLAError::InvalidSeverity as u32, 11);
+    assert_eq!(SLAError::RetentionLimitOutOfRange as u32, 12);
+    assert_eq!(SLAError::DuplicateOutageInput as u32, 13);
+    assert_eq!(SLAError::InvalidPenaltyAmount as u32, 14);
+    assert_eq!(SLAError::InvalidRewardAmount as u32, 15);
+    assert_eq!(SLAError::InvalidOutageId as u32, 16);
+    assert_eq!(SLAError::MalformedSymbolInput as u32, 17);
+    assert_eq!(SLAError::InvalidMTTR as u32, 18);
+    assert_eq!(SLAError::ThresholdOutOfBounds as u32, 19);
+    assert_eq!(SLAError::PenaltyOutOfBounds as u32, 20);
+    assert_eq!(SLAError::RewardOutOfBounds as u32, 21);
+    assert_eq!(SLAError::InvalidMonth as u32, 22);
+}
+// ============================================================
+
+#[test]
+fn test_sc565_set_operator_updates_operator() {
+    let (env, client, actors) = setup();
+    let new_op = soroban_sdk::Address::generate(&env);
+    client.set_operator(&actors.admin, &new_op);
+    assert_eq!(client.get_operator(), new_op);
+}
+
+#[test]
+#[should_panic]
+fn test_sc564_require_operator_rejects_non_operator() {
+    let (env, client, actors) = setup();
+    let outage = symbol(&env, "outage1");
+    let severity = symbol_short!("critical");
+    // A non-operator caller must be rejected by require_operator inside calculate_sla.
+    client.calculate_sla(&actors.stranger, &outage, &severity, &10u32);
+}
+
+#[test]
+fn test_sc566_cancel_admin_proposal_clears_pending() {
+    let (env, client, actors) = setup();
+    let candidate = soroban_sdk::Address::generate(&env);
+    client.propose_admin(&actors.admin, &candidate);
+    assert!(client.get_pending_admin().is_some());
+    client.cancel_admin_proposal(&actors.admin);
+    assert!(client.get_pending_admin().is_none());
+}
+
+#[test]
+fn test_sc567_cancel_operator_proposal_clears_pending() {
+    let (env, client, actors) = setup();
+    let candidate = soroban_sdk::Address::generate(&env);
+    client.propose_operator(&actors.admin, &candidate);
+    assert!(client.get_pending_operator().is_some());
+    client.cancel_operator_proposal(&actors.admin);
+    assert!(client.get_pending_operator().is_none());
+}
+
+// ============================================================
 // #603 – InvalidRewardAmount error code variant
 // ============================================================
 
@@ -8630,15 +8860,61 @@ fn test_paused_contract_rejects_calculate() {
 }
 
 // ============================================================
-// SC — Config counter, backup/restore, conversion, admin guard
-// (#560 config_update_count, #561 export/import_config_map,
-// #562 threshold_to_seconds, #563 require_admin)
+// SC — Config getters & validators (#552 is_canonical_severity,
+// #553 version-hash collision resistance, #554 get_config, #555 list_configs)
 // ============================================================
 
 #[test]
-fn test_sc560_config_update_count_increments() {
+fn test_sc554_get_config_returns_per_severity_config() {
+    let (_env, client, _actors) = setup();
+    assert_eq!(
+        client
+            .get_config(&symbol_short!("critical"))
+            .threshold_minutes,
+        15
+    );
+    assert_eq!(
+        client.get_config(&symbol_short!("low")).threshold_minutes,
+        120
+    );
+}
+
+#[test]
+#[should_panic]
+fn test_sc554_get_config_unknown_severity_errors() {
+    let (env, client, _actors) = setup();
+    client.get_config(&symbol(&env, "bogus"));
+}
+
+#[test]
+fn test_sc555_list_configs_returns_all_four() {
+    let (_env, client, _actors) = setup();
+    let configs = client.list_configs();
+    assert_eq!(configs.len(), 4);
+    assert!(configs.contains_key(symbol_short!("critical")));
+    assert!(configs.contains_key(symbol_short!("low")));
+}
+
+#[test]
+#[should_panic]
+fn test_sc552_non_canonical_severity_rejected_by_set_config() {
+    let (env, client, actors) = setup();
+    client.set_config(
+        &actors.admin,
+        &symbol(&env, "urgent"),
+        &10u32,
+        &100i128,
+        &750i128,
+        &200u32,
+        &150u32,
+        &100u32,
+    );
+}
+
+#[test]
+fn test_sc553_config_hash_changes_when_threshold_mutated() {
     let (_env, client, actors) = setup();
-    assert_eq!(client.get_config_update_count(), 0);
+    let before = client.get_config_version_hash();
     client.set_config(
         &actors.admin,
         &symbol_short!("critical"),
@@ -8649,6 +8925,20 @@ fn test_sc560_config_update_count_increments() {
         &150u32,
         &100u32,
     );
+    let after = client.get_config_version_hash();
+    assert_ne!(before, after);
+}
+
+// ============================================================
+// SC — Config counter, backup/restore, conversion, admin guard
+// (#560 config_update_count, #561 export/import_config_map,
+// #562 threshold_to_seconds, #563 require_admin)
+// ============================================================
+
+#[test]
+fn test_sc560_config_update_count_increments() {
+    let (_env, client, actors) = setup();
+    assert_eq!(client.get_config_update_count(), 0);
     assert_eq!(client.get_config_update_count(), 1);
     client.set_config(
         &actors.admin,
@@ -8716,4 +9006,58 @@ fn test_sc563_require_admin_rejects_non_admin_set_config() {
         ),
         Err(Ok(SLAError::Unauthorized))
     );
+}
+
+// ============================================================
+// SC — Operator authorization lifecycle (#572 get_pending_operator,
+// #573 operator whitelist authorization, #574 revoke_operator,
+// #575 renounce_operator)
+// ============================================================
+
+#[test]
+fn test_sc572_get_pending_operator_reflects_proposal() {
+    let (env, client, actors) = setup();
+    assert!(client.get_pending_operator().is_none());
+    let candidate = soroban_sdk::Address::generate(&env);
+    client.propose_operator(&actors.admin, &candidate);
+    assert_eq!(client.get_pending_operator(), Some(candidate));
+}
+
+#[test]
+fn test_sc573_only_whitelisted_operator_is_authorized() {
+    let (env, client, actors) = setup();
+    let new_op = soroban_sdk::Address::generate(&env);
+    client.set_operator(&actors.admin, &new_op);
+    let outage = symbol(&env, "outage1");
+    let severity = symbol_short!("critical");
+    client.calculate_sla(&new_op, &outage, &severity, &10u32);
+    let res = client.try_calculate_sla(&actors.operator, &outage, &severity, &10u32);
+    assert!(res.is_err());
+}
+
+#[test]
+fn test_sc574_admin_revoke_operator_removes_authorization() {
+    let (env, client, actors) = setup();
+    client.revoke_operator(&actors.admin);
+    let outage = symbol(&env, "outage1");
+    let severity = symbol_short!("critical");
+    let res = client.try_calculate_sla(&actors.operator, &outage, &severity, &10u32);
+    assert!(res.is_err());
+}
+
+#[test]
+fn test_sc575_operator_can_renounce_own_role() {
+    let (env, client, actors) = setup();
+    client.renounce_operator(&actors.operator);
+    let outage = symbol(&env, "outage1");
+    let severity = symbol_short!("critical");
+    let res = client.try_calculate_sla(&actors.operator, &outage, &severity, &10u32);
+    assert!(res.is_err());
+}
+
+#[test]
+#[should_panic]
+fn test_sc575_non_operator_cannot_renounce() {
+    let (_env, client, actors) = setup();
+    client.renounce_operator(&actors.stranger);
 }
