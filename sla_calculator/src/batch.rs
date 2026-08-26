@@ -499,3 +499,14 @@ pub fn find_result_by_outage_id(
     }
     None
 }
+
+#538 Batch: Add batch calculation atomicity option (all-or-nothing vs partial success)
+Repo Avatar
+OpSoll/noc-iq-contracts
+Description
+Allow callers to select whether batch calculation fails completely on any invalid item or returns partial results.
+
+Acceptance Criteria
+ Support strict_mode: bool parameter in batch invocation.
+ In strict mode, abort batch on first item error.
+ In non-strict mode, record item error in BatchResult and continue processing.
