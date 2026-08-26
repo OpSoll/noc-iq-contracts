@@ -8184,6 +8184,49 @@ fn test_257_hash_differs_across_all_four_severities() {
 }
 
 // ============================================================
+// SC — Access-control coverage (#564 require_operator, #565 set_operator,
+// #566 cancel_admin_proposal, #567 cancel_operator_proposal)
+// ============================================================
+
+#[test]
+fn test_sc565_set_operator_updates_operator() {
+    let (env, client, actors) = setup();
+    let new_op = soroban_sdk::Address::generate(&env);
+    client.set_operator(&actors.admin, &new_op);
+    assert_eq!(client.get_operator(), new_op);
+}
+
+#[test]
+#[should_panic]
+fn test_sc564_require_operator_rejects_non_operator() {
+    let (env, client, actors) = setup();
+    let outage = symbol(&env, "outage1");
+    let severity = symbol_short!("critical");
+    // A non-operator caller must be rejected by require_operator inside calculate_sla.
+    client.calculate_sla(&actors.stranger, &outage, &severity, &10u32);
+}
+
+#[test]
+fn test_sc566_cancel_admin_proposal_clears_pending() {
+    let (env, client, actors) = setup();
+    let candidate = soroban_sdk::Address::generate(&env);
+    client.propose_admin(&actors.admin, &candidate);
+    assert!(client.get_pending_admin().is_some());
+    client.cancel_admin_proposal(&actors.admin);
+    assert!(client.get_pending_admin().is_none());
+}
+
+#[test]
+fn test_sc567_cancel_operator_proposal_clears_pending() {
+    let (env, client, actors) = setup();
+    let candidate = soroban_sdk::Address::generate(&env);
+    client.propose_operator(&actors.admin, &candidate);
+    assert!(client.get_pending_operator().is_some());
+    client.cancel_operator_proposal(&actors.admin);
+    assert!(client.get_pending_operator().is_none());
+}
+
+// ============================================================
 // #603 – InvalidRewardAmount error code variant
 // ============================================================
 
@@ -8281,7 +8324,6 @@ fn test_invalid_reward_amount_does_not_appear_for_valid_calculations() {
         );
     }
 }
-
 
 // ============================================================
 // #607 – From<SLAError> for soroban_sdk::Error conversion
@@ -8433,7 +8475,6 @@ fn test_from_trait_conversion_matches_contract_error_macro_path() {
     assert_eq!(manual, via_trait);
 }
 
-
 // ============================================================
 // #611 – CPU instruction budget benchmark for calculate_sla
 // ============================================================
@@ -8522,7 +8563,6 @@ fn test_calculate_sla_cpu_budget_critical_severity() {
     );
 }
 
-
 // ============================================================
 // #619 – Proptest: MTTR monotonicity in penalty calculation
 // ============================================================
@@ -8607,7 +8647,6 @@ mod proptests {
         }
     }
 }
-
 
 // ============================================================
 // #623 – Paused contract rejects calculate_sla with ContractPaused
