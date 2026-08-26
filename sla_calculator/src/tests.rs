@@ -9460,3 +9460,35 @@ mod test {
         assert_eq!(SLARatingClassifier::to_symbol(&SLARating::Viol), symbol_short!("viol"));
     }
 }
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use proptest::prelude::*;
+
+    #[test]
+    fn test_monotonicity_valid_case() {
+        let res = SeverityValidator::validate_monotonicity(100, 75, 50, 25);
+        assert!(res.is_ok());
+    }
+
+    #[test]
+    fn test_monotonicity_violation_case() {
+        // High penalty equals critical penalty (violation)
+        let res = SeverityValidator::validate_monotonicity(100, 100, 50, 25);
+        assert_eq!(res, Err(PenaltyError::InvalidPenalty));
+    }
+
+    proptest! {
+        #[test]
+        fn prop_test_strict_monotonicity(
+            low in 1u64..10,
+            medium in 11u64..20,
+            high in 21u64..30,
+            critical in 31u64..40,
+        ) {
+            // Strictly ordered values must always pass validation
+            prop_assert!(SeverityValidator::validate_monotonicity(critical, high, medium, low).is_ok());
+        }
+    }
+}
