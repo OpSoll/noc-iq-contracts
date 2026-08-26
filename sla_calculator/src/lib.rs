@@ -87,6 +87,8 @@ const EVENT_OP_PROP: Symbol = symbol_short!("op_prop"); // #64
 const EVENT_OP_ACC: Symbol = symbol_short!("op_acc"); // #64
 const EVENT_OP_CAN: Symbol = symbol_short!("op_can"); // SC-024
 const EVENT_OP_REV: Symbol = symbol_short!("op_rev"); // #472
+const EVENT_SLA_VIOLATED: Symbol = symbol_short!("sla_viol"); // #594
+const EVENT_SLA_MET: Symbol = symbol_short!("sla_met"); // #595
 const EVENT_VERSION: Symbol = symbol_short!("v1");
 
 // -----------------------------------------------------------------------
@@ -950,7 +952,7 @@ impl SLACalculatorContract {
 
         // Emit in numeric order for deterministic consumption
         // All descriptions must be <= 32 bytes (Soroban Symbol constraint)
-        let entries: [(u32, &str, &str); 19] = [
+        let entries: [(u32, &str, &str); 22] = [
             (1, "AlreadyInitialized", "Contract already initialized"),
             (2, "NotInitialized", "Contract not yet initialized"),
             (3, "Unauthorized", "Caller lacks required role"),
@@ -970,10 +972,13 @@ impl SLACalculatorContract {
             (13, "DuplicateOutageInput", "Duplicate outage input"),
             (14, "InvalidPenaltyAmount", "Invalid penalty amount"),
             (15, "InvalidRewardAmount", "Invalid reward amount"),
+            (16, "InvalidOutageId", "Invalid outage identifier"),
+            (17, "MalformedSymbolInput", "Malformed symbol input"),
             (18, "InvalidMTTR", "MTTR must be greater than zero"),
             (19, "ThresholdOutOfBounds", "Threshold out of bounds"),
             (20, "PenaltyOutOfBounds", "Penalty out of bounds"),
             (21, "RewardOutOfBounds", "Reward out of bounds"),
+            (22, "InvalidMonth", "Invalid month value"),
         ];
 
         for (code, label, description) in entries {
@@ -1376,6 +1381,12 @@ impl SLACalculatorContract {
 
         Self::publish_sla_event(&env, severity.clone(), &result);
         Self::publish_settlement_intent_event(&env, severity, &result);
+
+        if result.status == symbol_short!("viol") {
+            Self::publish_sla_violated_event(&env, outage_id.clone(), &result);
+        } else {
+            Self::publish_sla_met_event(&env, outage_id.clone(), &result);
+        }
 
         Ok(result)
     }
@@ -1819,6 +1830,20 @@ impl SLACalculatorContract {
                 result.config_version_hash,
                 result.recorded_at,
             ),
+        );
+    }
+
+    fn publish_sla_violated_event(env: &Env, outage_id: Symbol, result: &SLAResult) {
+        env.events().publish(
+            (EVENT_SLA_VIOLATED, EVENT_VERSION, outage_id),
+            (result.mttr_minutes, result.threshold_minutes, result.amount),
+        );
+    }
+
+    fn publish_sla_met_event(env: &Env, outage_id: Symbol, result: &SLAResult) {
+        env.events().publish(
+            (EVENT_SLA_MET, EVENT_VERSION, outage_id),
+            (result.mttr_minutes, result.threshold_minutes, result.amount),
         );
     }
 
