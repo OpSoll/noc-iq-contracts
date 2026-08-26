@@ -972,13 +972,17 @@ impl SLACalculatorContract {
             (13, "DuplicateOutageInput", "Duplicate outage input"),
             (14, "InvalidPenaltyAmount", "Invalid penalty amount"),
             (15, "InvalidRewardAmount", "Invalid reward amount"),
-            (16, "InvalidOutageId", "Invalid outage identifier"),
-            (17, "MalformedSymbolInput", "Malformed symbol input"),
+            (16, "InvalidOutageId", "Outage ID rejected by validator"),
+            (
+                17,
+                "MalformedSymbolInput",
+                "Symbol contains invalid chars",
+            ),
             (18, "InvalidMTTR", "MTTR must be greater than zero"),
             (19, "ThresholdOutOfBounds", "Threshold out of bounds"),
             (20, "PenaltyOutOfBounds", "Penalty out of bounds"),
             (21, "RewardOutOfBounds", "Reward out of bounds"),
-            (22, "InvalidMonth", "Invalid month value"),
+            (22, "InvalidMonth", "Month out of range"),
         ];
 
         for (code, label, description) in entries {
@@ -1374,19 +1378,15 @@ impl SLACalculatorContract {
         if result.status == symbol_short!("viol") {
             // #29 – update stats (pass positive penalty value)
             Self::increment_stats(&env, false, 0, -result.amount);
+            Self::publish_sla_violated_event(&env, &result);
         } else {
             // #29 – update stats
             Self::increment_stats(&env, true, result.amount, 0);
+            Self::publish_sla_met_event(&env, &result);
         }
 
         Self::publish_sla_event(&env, severity.clone(), &result);
         Self::publish_settlement_intent_event(&env, severity, &result);
-
-        if result.status == symbol_short!("viol") {
-            Self::publish_sla_violated_event(&env, outage_id.clone(), &result);
-        } else {
-            Self::publish_sla_met_event(&env, outage_id.clone(), &result);
-        }
 
         Ok(result)
     }
@@ -1414,7 +1414,9 @@ impl SLACalculatorContract {
         };
 
         // Calculate uptime basis points (10000 bps = 100%) - (mttr / threshold) as percentage in bps
-        let uptime_bps = (mttr_minutes * 10000).checked_div(threshold).unwrap_or(0);
+        let uptime_bps = (mttr_minutes as i128)
+            .saturating_mul(10000)
+            .div_euclid(threshold as i128) as u32;
 
         // Map severity to the applied tier
         let applied_tier = Some(outage.severity.clone());
@@ -1436,12 +1438,24 @@ impl SLACalculatorContract {
     ) -> Result<SLAResult, SLAError> {
         let threshold = cfg.threshold_minutes;
 
+        if mttr_minutes == 0 {
+            return Ok(SLAResult {
+                outage_id,
+                status: symbol_short!("met"),
+                mttr_minutes: 0,
+                threshold_minutes: threshold,
+                amount: 0,
+                payment_type: symbol_short!("rew"),
+                rating: symbol_short!("top"),
+                config_version_hash,
+                recorded_at,
+            });
+        }
+
         // Case 1: SLA violated → penalty
         if mttr_minutes > threshold {
             let overtime = (mttr_minutes - threshold) as i128;
-            let penalty = overtime
-                .checked_mul(cfg.penalty_per_minute)
-                .ok_or(SLAError::InvalidPenaltyAmount)?;
+            let penalty = overtime.saturating_mul(cfg.penalty_per_minute);
             let amount = -penalty;
             if amount >= 0 {
                 return Err(SLAError::InvalidPenaltyAmount);
@@ -1460,7 +1474,8 @@ impl SLACalculatorContract {
             })
         } else {
             // Case 2: SLA met → reward
-            let performance_ratio = (mttr_minutes * 100).checked_div(threshold).unwrap_or(0);
+            let performance_ratio =
+                (mttr_minutes as i128).saturating_mul(100).div_euclid(threshold as i128);
 
             let (multiplier, rating) = if performance_ratio < 50 {
                 (cfg.top_tier_multiplier, symbol_short!("top"))
@@ -1472,8 +1487,7 @@ impl SLACalculatorContract {
 
             let reward = cfg
                 .reward_base
-                .checked_mul(multiplier as i128)
-                .ok_or(SLAError::InvalidRewardAmount)?
+                .saturating_mul(multiplier as i128)
                 .div_euclid(100);
 
             Ok(SLAResult {
@@ -1833,16 +1847,16 @@ impl SLACalculatorContract {
         );
     }
 
-    fn publish_sla_violated_event(env: &Env, outage_id: Symbol, result: &SLAResult) {
+    fn publish_sla_violated_event(env: &Env, result: &SLAResult) {
         env.events().publish(
-            (EVENT_SLA_VIOLATED, EVENT_VERSION, outage_id),
+            (EVENT_SLA_VIOLATED, EVENT_VERSION, result.outage_id.clone()),
             (result.mttr_minutes, result.threshold_minutes, result.amount),
         );
     }
 
-    fn publish_sla_met_event(env: &Env, outage_id: Symbol, result: &SLAResult) {
+    fn publish_sla_met_event(env: &Env, result: &SLAResult) {
         env.events().publish(
-            (EVENT_SLA_MET, EVENT_VERSION, outage_id),
+            (EVENT_SLA_MET, EVENT_VERSION, result.outage_id.clone()),
             (result.mttr_minutes, result.threshold_minutes, result.amount),
         );
     }

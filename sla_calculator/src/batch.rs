@@ -199,7 +199,8 @@ pub(crate) fn process_single(
         })
     } else {
         // Met
-        let performance_ratio = (req.mttr_minutes * 100) / threshold;
+        let performance_ratio =
+            (req.mttr_minutes as i128).saturating_mul(100).div_euclid(threshold as i128);
         let (multiplier, rating) = if performance_ratio < 50 {
             (cfg.top_tier_multiplier, symbol_short!("top"))
         } else if performance_ratio < 75 {
