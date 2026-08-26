@@ -9608,3 +9608,87 @@ mod isqrt_tests {
         assert!((root + 1) * (root + 1) > large_val);
     }
 }
+
+
+// ============================================================
+// #540 – batch_calculated event emission
+// ============================================================
+
+#[test]
+fn test_batch_calculate_emits_batch_calc_event() {
+    let (env, client, actors) = setup();
+
+    // One met (mttr under high threshold 30) + one violation (mttr over high threshold)
+    let mut requests = Vec::<BatchRequest>::new(&env);
+    requests.push_back(BatchRequest {
+        outage_id: symbol(&env, "EVT_MET"),
+        severity: symbol_short!("high"),
+        mttr_minutes: 10,
+    });
+    requests.push_back(BatchRequest {
+        outage_id: symbol(&env, "EVT_VIOL"),
+        severity: symbol_short!("high"),
+        mttr_minutes: 60,
+    });
+
+    let before = env.events().all().len();
+    let (summary, _) = client.batch_calculate(&actors.operator, &requests);
+    assert_eq!(summary.total, 2);
+    assert_eq!(summary.succeeded, 2);
+
+    let events = env.events().all();
+    assert!(events.len() > before, "batch_calculate must emit at least one event");
+
+    // Find the batch_calc event (last event from this call should be the summary).
+    let (_, topics, data) = events.last().unwrap();
+    let topic_0: Symbol = topics.get(0).unwrap().try_into_val(&env).unwrap();
+    let topic_1: Symbol = topics.get(1).unwrap().try_into_val(&env).unwrap();
+    let topic_2: soroban_sdk::Address = topics.get(2).unwrap().try_into_val(&env).unwrap();
+
+    assert_eq!(topic_0, symbol_short!("batch_calc"));
+    assert_eq!(topic_1, symbol_short!("v1"));
+    assert_eq!(topic_2, actors.operator);
+
+    // Payload: (total_items, met_count, violation_count, total_penalty)
+    let payload: (u32, u32, u32, i128) = data.try_into_val(&env).unwrap();
+    assert_eq!(payload.0, 2u32, "total_items");
+    assert_eq!(payload.1, 1u32, "met_count");
+    assert_eq!(payload.2, 1u32, "violation_count");
+    assert!(payload.3 > 0, "total_penalty must be positive absolute sum");
+}
+
+// ============================================================
+// #549 – config_updated event emission (cfg_upd)
+// ============================================================
+
+#[test]
+fn test_config_updated_event_emitted_on_set_config() {
+    let (env, client, actors) = setup();
+
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("medium"),
+        &45u32,
+        &75i128,
+        &400i128,
+        &200u32,
+        &150u32,
+        &100u32,
+    );
+
+    let events = env.events().all();
+    let (_, topics, data) = events.last().unwrap();
+
+    let topic_0: Symbol = topics.get(0).unwrap().try_into_val(&env).unwrap();
+    let topic_1: Symbol = topics.get(1).unwrap().try_into_val(&env).unwrap();
+    let topic_2: Symbol = topics.get(2).unwrap().try_into_val(&env).unwrap();
+
+    // topics: (EVENT_CONFIG_UPD, EVENT_VERSION, severity)
+    assert_eq!(topic_0, EVENT_CONFIG_UPD);
+    assert_eq!(topic_1, EVENT_VERSION);
+    assert_eq!(topic_2, symbol_short!("medium"));
+
+    // payload: (threshold_minutes, penalty_per_minute, reward_base)
+    let payload: (u32, i128, i128) = data.try_into_val(&env).unwrap();
+    assert_eq!(payload, (45u32, 75i128, 400i128));
+}

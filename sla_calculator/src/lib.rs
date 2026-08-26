@@ -2480,3 +2480,101 @@ pub fn isqrt(n: u128) -> u128 {
 
     ans
 }
+
+
+// -----------------------------------------------------------------------
+// #526 – Checked division helper
+// -----------------------------------------------------------------------
+
+/// Checked integer division for SLA math.
+///
+/// Returns `Err(SLAError::InvalidMTTR)` when the divisor is zero instead of
+/// panicking, so callers can surface a typed contract error.
+pub fn checked_div_sla(a: i128, b: i128) -> Result<i128, SLAError> {
+    if b == 0 {
+        return Err(SLAError::InvalidMTTR);
+    }
+    Ok(a / b)
+}
+
+// -----------------------------------------------------------------------
+// #532 – Multi-site outage penalty discount
+// -----------------------------------------------------------------------
+
+/// Discount factor in basis points applied when multiple sites experience
+/// simultaneous regional outages.
+///
+/// | Affected sites | Factor (bps) | Effective charge |
+/// |----------------|--------------|------------------|
+/// | 0 or 1         | 10_000       | 100% (no discount) |
+/// | 2              | 9_000        | 90% |
+/// | 3              | 8_000        | 80% |
+/// | 4+             | 7_000        | 70% (floor) |
+pub fn multi_site_discount_factor_bps(affected_site_count: u32) -> u32 {
+    match affected_site_count {
+        0 | 1 => 10_000,
+        2 => 9_000,
+        3 => 8_000,
+        _ => 7_000,
+    }
+}
+
+/// Apply the multi-site discount factor to a base penalty amount.
+///
+/// `base_penalty` is expected to be non-negative (absolute penalty units).
+/// Returns the discounted penalty, floored at zero via saturating math.
+pub fn apply_multi_site_discount(base_penalty: i128, affected_site_count: u32) -> i128 {
+    if base_penalty <= 0 {
+        return 0;
+    }
+    let factor = multi_site_discount_factor_bps(affected_site_count) as i128;
+    // base * factor / 10_000
+    base_penalty.saturating_mul(factor).saturating_div(10_000)
+}
+
+#[cfg(test)]
+mod math_helpers_tests {
+    use super::*;
+
+    // ── #526 ──────────────────────────────────────────────────────────
+    #[test]
+    fn test_checked_div_sla_happy_path() {
+        assert_eq!(checked_div_sla(100, 4).unwrap(), 25);
+        assert_eq!(checked_div_sla(-100, 4).unwrap(), -25);
+        assert_eq!(checked_div_sla(7, 2).unwrap(), 3);
+    }
+
+    #[test]
+    fn test_checked_div_sla_division_by_zero() {
+        let err = checked_div_sla(42, 0).unwrap_err();
+        assert_eq!(err, SLAError::InvalidMTTR);
+        let err2 = checked_div_sla(0, 0).unwrap_err();
+        assert_eq!(err2, SLAError::InvalidMTTR);
+    }
+
+    // ── #532 ──────────────────────────────────────────────────────────
+    #[test]
+    fn test_multi_site_discount_factor_by_count() {
+        assert_eq!(multi_site_discount_factor_bps(0), 10_000);
+        assert_eq!(multi_site_discount_factor_bps(1), 10_000);
+        assert_eq!(multi_site_discount_factor_bps(2), 9_000);
+        assert_eq!(multi_site_discount_factor_bps(3), 8_000);
+        assert_eq!(multi_site_discount_factor_bps(4), 7_000);
+        assert_eq!(multi_site_discount_factor_bps(10), 7_000);
+    }
+
+    #[test]
+    fn test_apply_multi_site_discount_math() {
+        // Single site: no discount
+        assert_eq!(apply_multi_site_discount(1_000, 1), 1_000);
+        // Two sites: 90%
+        assert_eq!(apply_multi_site_discount(1_000, 2), 900);
+        // Three sites: 80%
+        assert_eq!(apply_multi_site_discount(1_000, 3), 800);
+        // Four+ sites: 70%
+        assert_eq!(apply_multi_site_discount(1_000, 5), 700);
+        // Zero / negative base → 0
+        assert_eq!(apply_multi_site_discount(0, 3), 0);
+        assert_eq!(apply_multi_site_discount(-500, 2), 0);
+    }
+}
