@@ -42,6 +42,7 @@ const PROPOSAL_EXPIRATION_SECONDS: u64 = 604800; // 7 days in seconds
 const MIGRATION_KEY: Symbol = symbol_short!("MIGKEY"); // #577
 const MIGRATION_TIME_KEY: Symbol = symbol_short!("MIGTIME"); // #577
 const MIGRATION_TIMELock: u64 = 1_209_600; // 14 days in seconds
+const CONFIG_UPD_COUNT_KEY: Symbol = symbol_short!("CFGUPDCT"); // #560: total config updates
 
 // -----------------------------------------------------------------------
 // Events
@@ -876,23 +877,90 @@ impl SLACalculatorContract {
             &configs,
         )?;
 
-        configs.set(
-            severity.clone(),
-            SLAConfig {
-                threshold_minutes,
-                penalty_per_minute,
-                reward_base,
-                top_tier_multiplier,
-                excel_tier_multiplier,
-                good_tier_multiplier,
-            },
-        );
+        let new_config = SLAConfig {
+            threshold_minutes,
+            penalty_per_minute,
+            reward_base,
+            top_tier_multiplier,
+            excel_tier_multiplier,
+            good_tier_multiplier,
+        };
+
+        // #556 – idempotency: a re-submission of the identical configuration for
+        // this severity is a no-op (no storage write, no event emitted).
+        if let Some(existing) = configs.get(severity.clone()) {
+            if existing == new_config {
+                return Ok(());
+            }
+        }
+
+        configs.set(severity.clone(), new_config);
         env.storage().instance().set(&CONFIG_KEY, &configs);
+
+        // #560 – track total successful configuration updates.
+        let updates: u32 = env
+            .storage()
+            .instance()
+            .get(&CONFIG_UPD_COUNT_KEY)
+            .unwrap_or(0);
+        env.storage()
+            .instance()
+            .set(&CONFIG_UPD_COUNT_KEY, &(updates + 1));
 
         env.events().publish(
             (EVENT_CONFIG_UPD, EVENT_VERSION, severity),
             (threshold_minutes, penalty_per_minute, reward_base),
         );
+        Ok(())
+    }
+
+    /// #560 – Total number of successful `set_config` updates over the contract
+    /// lifetime.
+    pub fn get_config_update_count(env: Env) -> Result<u32, SLAError> {
+        Self::check_version(&env)?;
+        Ok(env
+            .storage()
+            .instance()
+            .get(&CONFIG_UPD_COUNT_KEY)
+            .unwrap_or(0))
+    }
+
+    /// #562 – Convert a configuration threshold expressed in minutes to ledger
+    /// seconds.
+    pub fn threshold_to_seconds(threshold_minutes: u32) -> u64 {
+        (threshold_minutes as u64) * 60
+    }
+
+    /// #561 – Export the complete configuration map for contract upgrades.
+    pub fn export_config_map(env: Env) -> Result<Map<Symbol, SLAConfig>, SLAError> {
+        Self::check_version(&env)?;
+        env.storage()
+            .instance()
+            .get(&CONFIG_KEY)
+            .ok_or(SLAError::NotInitialized)
+    }
+
+    /// #561 – Import a complete configuration map (admin only) during an upgrade.
+    ///
+    /// Validates integrity before persisting: the map must be non-empty and every
+    /// severity key must be canonical, otherwise the import is rejected and the
+    /// existing configuration is left untouched.
+    pub fn import_config_map(
+        env: Env,
+        caller: Address,
+        configs: Map<Symbol, SLAConfig>,
+    ) -> Result<(), SLAError> {
+        Self::check_version(&env)?;
+        Self::require_admin(&env, &caller)?;
+        if configs.is_empty() {
+            return Err(SLAError::ConfigNotFound);
+        }
+        for (severity, _config) in configs.iter() {
+            if !Self::is_canonical_severity(&severity) {
+                return Err(SLAError::InvalidSeverity);
+            }
+        }
+        env.storage().instance().set(&CONFIG_KEY, &configs);
         Ok(())
     }
 
