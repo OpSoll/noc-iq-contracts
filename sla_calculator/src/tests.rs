@@ -9415,6 +9415,83 @@ fn test_set_retention_limit_non_admin_rejected() {
     assert!(result.is_err(), "non-admin must be rejected");
 }
 
+#[cfg(test)]
+mod test {
+    use super::*;
+    use soroban_sdk::{Env, Vec};
+
+    #[test]
+    fn test_batch_execution_timestamp_recording() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        // Set a deterministic ledger timestamp for testing
+        env.ledger().set_timestamp(1710000000);
+
+        let mut item_ids = Vec::new(&env);
+        item_ids.push_back(101);
+        item_ids.push_back(102);
+
+        let results = BatchExecutionManager::process_batch(&env, item_ids);
+
+        assert_eq!(results.len(), 2);
+        
+        for result in results.iter() {
+            assert_eq!(result.recorded_at, 1710000000);
+            assert!(result.success);
+        }
+    }
+}
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn test_sla_rating_classification() {
+        assert_eq!(SLARatingClassifier::classify_sla(100), SLARating::Top);
+        assert_eq!(SLARatingClassifier::classify_sla(99), SLARating::Top);
+        assert_eq!(SLARatingClassifier::classify_sla(97), SLARating::Excel);
+        assert_eq!(SLARatingClassifier::classify_sla(92), SLARating::Good);
+        assert_eq!(SLARatingClassifier::classify_sla(85), SLARating::Viol);
+
+        // Verify symbol mappings
+        assert_eq!(SLARatingClassifier::to_symbol(&SLARating::Top), symbol_short!("top"));
+        assert_eq!(SLARatingClassifier::to_symbol(&SLARating::Viol), symbol_short!("viol"));
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use proptest::prelude::*;
+
+    #[test]
+    fn test_monotonicity_valid_case() {
+        let res = SeverityValidator::validate_monotonicity(100, 75, 50, 25);
+        assert!(res.is_ok());
+    }
+
+    #[test]
+    fn test_monotonicity_violation_case() {
+        // High penalty equals critical penalty (violation)
+        let res = SeverityValidator::validate_monotonicity(100, 100, 50, 25);
+        assert_eq!(res, Err(PenaltyError::InvalidPenalty));
+    }
+
+    proptest! {
+        #[test]
+        fn prop_test_strict_monotonicity(
+            low in 1u64..10,
+            medium in 11u64..20,
+            high in 21u64..30,
+            critical in 31u64..40,
+        ) {
+            // Strictly ordered values must always pass validation
+            prop_assert!(SeverityValidator::validate_monotonicity(critical, high, medium, low).is_ok());
+        }
+    }
+}
+
 #[test]
 fn test_issue_527_saturating_add_prevents_overflow() {
     let (env, client, actors) = setup();
