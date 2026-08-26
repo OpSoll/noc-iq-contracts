@@ -8930,6 +8930,38 @@ fn test_sc553_config_hash_changes_when_threshold_mutated() {
 }
 
 // ============================================================
+// #620 – Proptest: SLA calculation deterministic reproducibility
+// ============================================================
+
+use proptest::prelude::*;
+
+proptest! {
+    #[test]
+    fn test_sla_calculation_deterministic_reproducibility(
+        severity_idx in 0u32..4u32,
+        mttr in 1u32..1440u32,
+    ) {
+        let (env, _client, _actors) = setup();
+        let cfg = match severity_idx {
+            0 => SLAConfig { threshold_minutes: 15, penalty_per_minute: 100, reward_base: 750, top_tier_multiplier: 200, excel_tier_multiplier: 150, good_tier_multiplier: 100 },
+            1 => SLAConfig { threshold_minutes: 30, penalty_per_minute: 50, reward_base: 750, top_tier_multiplier: 200, excel_tier_multiplier: 150, good_tier_multiplier: 100 },
+            2 => SLAConfig { threshold_minutes: 60, penalty_per_minute: 25, reward_base: 750, top_tier_multiplier: 200, excel_tier_multiplier: 150, good_tier_multiplier: 100 },
+            _ => SLAConfig { threshold_minutes: 120, penalty_per_minute: 10, reward_base: 600, top_tier_multiplier: 200, excel_tier_multiplier: 150, good_tier_multiplier: 100 },
+        };
+        let hash = 12345u64;
+
+        let r1 = SLACalculatorContract::compute_result(
+            Symbol::new(&env, "OUT1"), mttr, &cfg, hash, 1000,
+        ).unwrap();
+        let r2 = SLACalculatorContract::compute_result(
+            Symbol::new(&env, "OUT2"), mttr, &cfg, hash, 1000,
+        ).unwrap();
+
+        prop_assert_eq!(r1.status, r2.status);
+        prop_assert_eq!(r1.amount, r2.amount);
+        prop_assert_eq!(r1.rating, r2.rating);
+        prop_assert_eq!(r1.payment_type, r2.payment_type);
+    }
 // SC — Operator authorization lifecycle (#572 get_pending_operator,
 // #573 operator whitelist authorization, #574 revoke_operator,
 // #575 renounce_operator)
