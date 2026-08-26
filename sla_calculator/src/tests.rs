@@ -8182,3 +8182,74 @@ fn test_257_hash_differs_across_all_four_severities() {
     let h4 = client.get_config_version_hash();
     assert_ne!(h3, h4);
 }
+
+// ============================================================
+// SC — Config getters & validators (#552 is_canonical_severity,
+// #553 version-hash collision resistance, #554 get_config, #555 list_configs)
+// ============================================================
+
+#[test]
+fn test_sc554_get_config_returns_per_severity_config() {
+    let (_env, client, _actors) = setup();
+    assert_eq!(
+        client
+            .get_config(&symbol_short!("critical"))
+            .threshold_minutes,
+        15
+    );
+    assert_eq!(
+        client.get_config(&symbol_short!("low")).threshold_minutes,
+        120
+    );
+}
+
+#[test]
+#[should_panic]
+fn test_sc554_get_config_unknown_severity_errors() {
+    let (env, client, _actors) = setup();
+    client.get_config(&symbol(&env, "bogus"));
+}
+
+#[test]
+fn test_sc555_list_configs_returns_all_four() {
+    let (_env, client, _actors) = setup();
+    let configs = client.list_configs();
+    assert_eq!(configs.len(), 4);
+    assert!(configs.contains_key(symbol_short!("critical")));
+    assert!(configs.contains_key(symbol_short!("low")));
+}
+
+#[test]
+#[should_panic]
+fn test_sc552_non_canonical_severity_rejected_by_set_config() {
+    let (env, client, actors) = setup();
+    // is_canonical_severity rejects any severity outside the standard four.
+    client.set_config(
+        &actors.admin,
+        &symbol(&env, "urgent"),
+        &10u32,
+        &100i128,
+        &750i128,
+        &200u32,
+        &150u32,
+        &100u32,
+    );
+}
+
+#[test]
+fn test_sc553_config_hash_changes_when_threshold_mutated() {
+    let (_env, client, actors) = setup();
+    let before = client.get_config_version_hash();
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("critical"),
+        &14u32, // was 15
+        &100i128,
+        &750i128,
+        &200u32,
+        &150u32,
+        &100u32,
+    );
+    let after = client.get_config_version_hash();
+    assert_ne!(before, after);
+}
