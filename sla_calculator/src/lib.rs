@@ -39,6 +39,9 @@ const RESULT_SCHEMA_VERSION: u32 = 1;
 const MAX_HISTORY_SIZE: u32 = 1000; // SC-062: bounded retention cap
 const RETENTION_LIMIT_KEY: Symbol = symbol_short!("RETLIM"); // SC-013: configurable retention
 const PROPOSAL_EXPIRATION_SECONDS: u64 = 604800; // 7 days in seconds
+const MIGRATION_KEY: Symbol = symbol_short!("MIGKEY"); // #577
+const MIGRATION_TIME_KEY: Symbol = symbol_short!("MIGTIME"); // #577
+const MIGRATION_TIMELock: u64 = 1_209_600; // 14 days in seconds
 
 // -----------------------------------------------------------------------
 // Events
@@ -89,6 +92,10 @@ const EVENT_OP_CAN: Symbol = symbol_short!("op_can"); // SC-024
 const EVENT_OP_REV: Symbol = symbol_short!("op_rev"); // #472
 const EVENT_SLA_VIOLATED: Symbol = symbol_short!("sla_viol"); // #594
 const EVENT_SLA_MET: Symbol = symbol_short!("sla_met"); // #595
+const EVENT_ROLE_AUDIT: Symbol = symbol_short!("role_aud"); // #576
+const EVENT_MIGRATION_SET: Symbol = symbol_short!("migr_set"); // #577
+const EVENT_MIGRATION_ACT: Symbol = symbol_short!("migr_act"); // #577
+const EVENT_HISTORY_PRUNED_Q: Symbol = symbol_short!("hist_pq"); // #578
 const EVENT_VERSION: Symbol = symbol_short!("v1");
 
 // -----------------------------------------------------------------------
@@ -510,16 +517,26 @@ impl SLACalculatorContract {
     // -------------------------------------------------------------------
 
     /// Replace the operator address (admin only).
-    /// Emits an `op_set` event.
+    /// Emits an `op_set` event and a `role_aud` audit trail event (#576).
     pub fn set_operator(env: Env, caller: Address, new_operator: Address) -> Result<(), SLAError> {
         Self::check_version(&env)?;
         Self::require_admin(&env, &caller)?;
 
+        let prev_operator: Option<Address> = env.storage().instance().get(&OPERATOR_KEY);
         env.storage().instance().set(&OPERATOR_KEY, &new_operator);
 
         env.events().publish(
-            (EVENT_OP_SET, EVENT_VERSION, caller),
+            (EVENT_OP_SET, EVENT_VERSION, caller.clone()),
             (new_operator.clone(),),
+        );
+
+        // #576 – Role audit trail event
+        Self::publish_role_audit_event(
+            &env,
+            &caller,
+            symbol_short!("operator"),
+            prev_operator.as_ref(),
+            Some(&new_operator),
         );
 
         Ok(())
@@ -604,10 +621,21 @@ impl SLACalculatorContract {
         if caller != pending.target {
             return Err(SLAError::Unauthorized);
         }
+        let prev_admin: Option<Address> = env.storage().instance().get(&ADMIN_KEY);
         env.storage().instance().set(&ADMIN_KEY, &caller);
         env.storage().instance().remove(&PENDING_ADMIN_KEY);
         env.events()
-            .publish((EVENT_ADMIN_ACC, EVENT_VERSION, caller), ());
+            .publish((EVENT_ADMIN_ACC, EVENT_VERSION, caller.clone()), ());
+
+        // #576 – Role audit trail event
+        Self::publish_role_audit_event(
+            &env,
+            &caller,
+            symbol_short!("admin"),
+            prev_admin.as_ref(),
+            Some(&caller),
+        );
+
         Ok(())
     }
 
@@ -701,10 +729,21 @@ impl SLACalculatorContract {
         if caller != pending.target {
             return Err(SLAError::Unauthorized);
         }
+        let prev_operator: Option<Address> = env.storage().instance().get(&OPERATOR_KEY);
         env.storage().instance().set(&OPERATOR_KEY, &caller);
         env.storage().instance().remove(&PENDING_OP_KEY);
         env.events()
-            .publish((EVENT_OP_ACC, EVENT_VERSION, caller), ());
+            .publish((EVENT_OP_ACC, EVENT_VERSION, caller.clone()), ());
+
+        // #576 – Role audit trail event
+        Self::publish_role_audit_event(
+            &env,
+            &caller,
+            symbol_short!("operator"),
+            prev_operator.as_ref(),
+            Some(&caller),
+        );
+
         Ok(())
     }
 
@@ -1879,6 +1918,25 @@ impl SLACalculatorContract {
     }
 
     // -------------------------------------------------------------------
+    // #576 – Role audit trail event logger
+    // -------------------------------------------------------------------
+
+    fn publish_role_audit_event(
+        env: &Env,
+        caller: &Address,
+        role: Symbol,
+        prev_address: Option<&Address>,
+        new_address: Option<&Address>,
+    ) {
+        let prev_present = prev_address.is_some();
+        let new_present = new_address.is_some();
+        env.events().publish(
+            (EVENT_ROLE_AUDIT, EVENT_VERSION, caller.clone()),
+            (role, prev_present, new_present),
+        );
+    }
+
+    // -------------------------------------------------------------------
     // #33 - History & Compaction (Admin only)
     // -------------------------------------------------------------------
 
@@ -2110,13 +2168,13 @@ impl SLACalculatorContract {
     // SC-013 – Configurable retention limit (admin only)
     // -------------------------------------------------------------------
 
-    /// Set the maximum number of history entries to retain.
-    /// Must be between 1 and MAX_HISTORY_SIZE (1000). Admin only.
+    /// Set the maximum number of history entries to retain (#579).
+    /// Must be between 50 and 5,000. Admin only.
     /// The new limit takes effect on the next `calculate_sla` call.
     pub fn set_retention_limit(env: Env, caller: Address, limit: u32) -> Result<(), SLAError> {
         Self::check_version(&env)?;
         Self::require_admin(&env, &caller)?;
-        if limit == 0 || limit > MAX_HISTORY_SIZE {
+        if limit < 50 || limit > 5000 {
             return Err(SLAError::RetentionLimitOutOfRange);
         }
         env.storage().instance().set(&RETENTION_LIMIT_KEY, &limit);
@@ -2180,5 +2238,123 @@ impl SLACalculatorContract {
             is_paused,
             contract_name: symbol_short!("sla_calc"),
         })
+    }
+
+    // -------------------------------------------------------------------
+    // #577 – Emergency contract migration key
+    // -------------------------------------------------------------------
+
+    /// Set an emergency migration key for contract upgrades (#577).
+    /// Enforces a 14-day timelock before the key becomes active.
+    /// Admin only. Emits a `migr_set` event.
+    pub fn set_migration_key(
+        env: Env,
+        caller: Address,
+        migration_address: Address,
+    ) -> Result<(), SLAError> {
+        Self::check_version(&env)?;
+        Self::require_admin(&env, &caller)?;
+
+        let now = env.ledger().timestamp();
+        env.storage().instance().set(&MIGRATION_KEY, &migration_address);
+        env.storage().instance().set(&MIGRATION_TIME_KEY, &now);
+
+        env.events().publish(
+            (EVENT_MIGRATION_SET, EVENT_VERSION, caller),
+            (migration_address,),
+        );
+
+        Ok(())
+    }
+
+    /// Execute emergency migration using the migration key (#577).
+    /// Only callable after the 14-day timelock has elapsed.
+    /// Emits a `migr_act` event on success.
+    pub fn execute_migration(env: Env, caller: Address) -> Result<(), SLAError> {
+        Self::check_version(&env)?;
+
+        let migration_addr: Address = env
+            .storage()
+            .instance()
+            .get(&MIGRATION_KEY)
+            .ok_or(SLAError::NoPendingTransfer)?;
+
+        if caller != migration_addr {
+            return Err(SLAError::Unauthorized);
+        }
+
+        let set_time: u64 = env
+            .storage()
+            .instance()
+            .get(&MIGRATION_TIME_KEY)
+            .ok_or(SLAError::NotInitialized)?;
+
+        let now = env.ledger().timestamp();
+        if now.saturating_sub(set_time) < MIGRATION_TIMELock {
+            return Err(SLAError::ThresholdOutOfBounds);
+        }
+
+        // Bump storage version to trigger migration path
+        let current_version: u32 = env
+            .storage()
+            .instance()
+            .get(&STORAGE_VERSION_KEY)
+            .unwrap_or(0);
+        env.storage()
+            .instance()
+            .set(&STORAGE_VERSION_KEY, &(current_version + 1));
+
+        // Clean up migration state
+        env.storage().instance().remove(&MIGRATION_KEY);
+        env.storage().instance().remove(&MIGRATION_TIME_KEY);
+
+        env.events()
+            .publish((EVENT_MIGRATION_ACT, EVENT_VERSION, caller), ());
+
+        Ok(())
+    }
+
+    // -------------------------------------------------------------------
+    // #578 – History pruning queue
+    // -------------------------------------------------------------------
+
+    /// Automatically prune oldest history entries when count exceeds
+    /// the configured retention limit (#578).
+    /// Emits `hist_pq` event with count of pruned entries.
+    pub fn prune_history_queue(env: Env, caller: Address) -> Result<u32, SLAError> {
+        Self::check_version(&env)?;
+        Self::require_admin(&env, &caller)?;
+
+        let retention_limit: u32 = env
+            .storage()
+            .instance()
+            .get(&RETENTION_LIMIT_KEY)
+            .unwrap_or(MAX_HISTORY_SIZE);
+
+        let history: Vec<SLAResult> = env
+            .storage()
+            .instance()
+            .get(&HISTORY_KEY)
+            .unwrap_or_else(|| Vec::new(&env));
+
+        let len = history.len();
+        if len <= retention_limit {
+            return Ok(0);
+        }
+
+        let remove_count = len - retention_limit;
+        let mut new_history = Vec::new(&env);
+
+        for i in remove_count..len {
+            new_history.push_back(history.get(i).unwrap());
+        }
+
+        env.storage().instance().set(&HISTORY_KEY, &new_history);
+        env.events().publish(
+            (EVENT_HISTORY_PRUNED_Q, EVENT_VERSION, caller),
+            (remove_count, retention_limit),
+        );
+
+        Ok(remove_count)
     }
 }

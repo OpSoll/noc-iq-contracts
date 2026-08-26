@@ -4167,7 +4167,7 @@ fn test_set_retention_limit_zero_fails() {
 #[should_panic]
 fn test_set_retention_limit_above_max_fails() {
     let (_env, client, actors) = setup();
-    client.set_retention_limit(&actors.admin, &1001);
+    client.set_retention_limit(&actors.admin, &5001);
 }
 
 #[test]
@@ -4182,10 +4182,10 @@ fn test_retention_limit_enforced_on_calculate() {
     client.initialize(&admin, &op);
 
     // Set a small retention limit
-    client.set_retention_limit(&admin, &5);
+    client.set_retention_limit(&admin, &50);
 
-    // Insert 10 entries
-    for i in 0..10u32 {
+    // Insert 100 entries
+    for i in 0..100u32 {
         client.calculate_sla(
             &op,
             &symbol(&env, &format!("RET{}", i)),
@@ -4195,7 +4195,7 @@ fn test_retention_limit_enforced_on_calculate() {
     }
 
     // History must be capped at the configured limit, not MAX_HISTORY_SIZE
-    assert_eq!(client.get_history().len(), 5);
+    assert_eq!(client.get_history().len(), 50);
 }
 
 #[test]
@@ -4209,18 +4209,25 @@ fn test_retention_limit_drops_oldest_when_exceeded() {
     let op = soroban_sdk::Address::generate(&env);
     client.initialize(&admin, &op);
 
-    client.set_retention_limit(&admin, &3);
+    client.set_retention_limit(&admin, &50);
 
     client.calculate_sla(&op, &symbol(&env, "FIRST"), &symbol_short!("low"), &10);
     client.calculate_sla(&op, &symbol(&env, "SECOND"), &symbol_short!("low"), &10);
-    client.calculate_sla(&op, &symbol(&env, "THIRD"), &symbol_short!("low"), &10);
+    for i in 2..50u32 {
+        client.calculate_sla(
+            &op,
+            &symbol(&env, &format!("MID{}", i)),
+            &symbol_short!("low"),
+            &10,
+        );
+    }
     // This push should evict FIRST
     client.calculate_sla(&op, &symbol(&env, "FOURTH"), &symbol_short!("low"), &10);
 
     let history = client.get_history();
-    assert_eq!(history.len(), 3);
+    assert_eq!(history.len(), 50);
     assert_eq!(history.get(0).unwrap().outage_id, symbol(&env, "SECOND"));
-    assert_eq!(history.get(2).unwrap().outage_id, symbol(&env, "FOURTH"));
+    assert_eq!(history.get(49).unwrap().outage_id, symbol(&env, "FOURTH"));
 }
 
 #[test]
@@ -4239,8 +4246,8 @@ fn test_retention_limit_update_takes_effect_on_next_calculate() {
     let op = soroban_sdk::Address::generate(&env);
     client.initialize(&admin, &op);
 
-    // Fill 10 entries with default limit
-    for i in 0..10u32 {
+    // Fill 60 entries with default limit
+    for i in 0..60u32 {
         client.calculate_sla(
             &op,
             &symbol(&env, &format!("BEF{}", i)),
@@ -4248,39 +4255,39 @@ fn test_retention_limit_update_takes_effect_on_next_calculate() {
             &10,
         );
     }
-    assert_eq!(client.get_history().len(), 10);
+    assert_eq!(client.get_history().len(), 60);
 
     // Lower the limit; existing history is not pruned automatically
-    client.set_retention_limit(&admin, &5);
+    client.set_retention_limit(&admin, &50);
     assert_eq!(
         client.get_history().len(),
-        10,
+        60,
         "Lowering limit must not retroactively prune"
     );
 
     // Each calculate_sla call pushes 1 and drops 1 (net zero) while history > limit.
-    // History stays at 10 until an explicit prune brings it to the new limit.
+    // History stays at 60 until an explicit prune brings it to the new limit.
     client.calculate_sla(&op, &symbol(&env, "AFT0"), &symbol_short!("low"), &10);
     assert_eq!(
         client.get_history().len(),
-        10,
-        "History stays at 10 (push 1, drop 1)"
+        60,
+        "History stays at 60 (push 1, drop 1)"
     );
 
     // Explicit prune brings history down to the new limit
-    client.prune_history(&admin, &5);
+    client.prune_history(&admin, &50);
     assert_eq!(
         client.get_history().len(),
-        5,
+        50,
         "Explicit prune must enforce the new limit"
     );
 
-    // Now the cap is active: further calculations stay at 5
+    // Now the cap is active: further calculations stay at 50
     client.calculate_sla(&op, &symbol(&env, "CAP0"), &symbol_short!("low"), &10);
     assert_eq!(
         client.get_history().len(),
-        5,
-        "History must stay at 5 after cap is active"
+        50,
+        "History must stay at 50 after cap is active"
     );
 }
 
@@ -5123,8 +5130,8 @@ fn test_storage_growth_history_grows_linearly_then_caps() {
     let op = soroban_sdk::Address::generate(&env);
     client.initialize(&admin, &op);
 
-    // Grow to 10 entries
-    for i in 0..10u32 {
+    // Grow to 50 entries
+    for i in 0..50u32 {
         client.calculate_sla(
             &op,
             &symbol(&env, &format!("GRW{}", i)),
@@ -5140,11 +5147,11 @@ fn test_storage_growth_history_grows_linearly_then_caps() {
     }
 
     // Set a small cap and verify it holds
-    client.set_retention_limit(&admin, &10);
-    client.calculate_sla(&op, &symbol(&env, "GRW10"), &symbol_short!("low"), &10);
+    client.set_retention_limit(&admin, &50);
+    client.calculate_sla(&op, &symbol(&env, "GRW50"), &symbol_short!("low"), &10);
     assert_eq!(
         client.get_history().len(),
-        10,
+        50,
         "History must not exceed the retention limit"
     );
 }
@@ -5308,7 +5315,7 @@ fn test_storage_growth_retention_limit_prevents_unbounded_growth() {
     let op = soroban_sdk::Address::generate(&env);
     client.initialize(&admin, &op);
 
-    client.set_retention_limit(&admin, &20);
+    client.set_retention_limit(&admin, &50);
 
     for i in 0..100u32 {
         client.calculate_sla(
@@ -5321,7 +5328,7 @@ fn test_storage_growth_retention_limit_prevents_unbounded_growth() {
 
     assert_eq!(
         client.get_history().len(),
-        20,
+        50,
         "History must be capped at the configured retention limit"
     );
 }
@@ -8962,6 +8969,8 @@ proptest! {
         prop_assert_eq!(r1.rating, r2.rating);
         prop_assert_eq!(r1.payment_type, r2.payment_type);
     }
+}
+
 // SC — Operator authorization lifecycle (#572 get_pending_operator,
 // #573 operator whitelist authorization, #574 revoke_operator,
 // #575 renounce_operator)
@@ -9013,4 +9022,194 @@ fn test_sc575_operator_can_renounce_own_role() {
 fn test_sc575_non_operator_cannot_renounce() {
     let (_env, client, actors) = setup();
     client.renounce_operator(&actors.stranger);
+}
+
+// ============================================================
+// #576 – Role audit trail event logger
+// ============================================================
+
+#[test]
+fn test_role_audit_event_emitted_on_set_operator() {
+    let (env, client, actors) = setup();
+    let new_op = soroban_sdk::Address::generate(&env);
+    client.set_operator(&actors.admin, &new_op);
+
+    let events = env.events().all();
+    let mut found_audit = false;
+    for i in 0..events.len() {
+        let (_, topics, data) = events.get(i).unwrap();
+        let t0: Symbol = topics.get(0).unwrap().try_into_val(&env).unwrap();
+        if t0 == symbol_short!("role_aud") {
+            found_audit = true;
+            let t1: Symbol = topics.get(1).unwrap().try_into_val(&env).unwrap();
+            assert_eq!(t1, EVENT_VERSION);
+            let payload: (Symbol, bool, bool) = data.try_into_val(&env).unwrap();
+            assert_eq!(payload.0, symbol_short!("operator"));
+        }
+    }
+    assert!(found_audit, "role_aud event must be emitted on set_operator");
+}
+
+#[test]
+fn test_role_audit_event_emitted_on_accept_admin() {
+    let (env, client, actors) = setup();
+    let new_admin = soroban_sdk::Address::generate(&env);
+    client.propose_admin(&actors.admin, &new_admin);
+    client.accept_admin(&new_admin);
+
+    let events = env.events().all();
+    let mut found_audit = false;
+    for i in 0..events.len() {
+        let (_, topics, data) = events.get(i).unwrap();
+        let t0: Symbol = topics.get(0).unwrap().try_into_val(&env).unwrap();
+        if t0 == symbol_short!("role_aud") {
+            found_audit = true;
+            let payload: (Symbol, bool, bool) = data.try_into_val(&env).unwrap();
+            assert_eq!(payload.0, symbol_short!("admin"));
+            assert!(payload.1, "prev_present should be true");
+            assert!(payload.2, "new_present should be true");
+        }
+    }
+    assert!(found_audit, "role_aud event must be emitted on accept_admin");
+}
+
+#[test]
+fn test_role_audit_event_emitted_on_accept_operator() {
+    let (env, client, actors) = setup();
+    let new_op = soroban_sdk::Address::generate(&env);
+    client.propose_operator(&actors.admin, &new_op);
+    client.accept_operator(&new_op);
+
+    let events = env.events().all();
+    let mut found_audit = false;
+    for i in 0..events.len() {
+        let (_, topics, _) = events.get(i).unwrap();
+        let t0: Symbol = topics.get(0).unwrap().try_into_val(&env).unwrap();
+        if t0 == symbol_short!("role_aud") {
+            found_audit = true;
+        }
+    }
+    assert!(found_audit, "role_aud event must be emitted on accept_operator");
+}
+
+// ============================================================
+// #577 – Emergency contract migration key
+// ============================================================
+
+#[test]
+fn test_set_migration_key_stores_address() {
+    let (env, client, actors) = setup();
+    let migr_addr = soroban_sdk::Address::generate(&env);
+    client.set_migration_key(&actors.admin, &migr_addr);
+
+    let events = env.events().all();
+    let mut found = false;
+    for i in 0..events.len() {
+        let (_, topics, _) = events.get(i).unwrap();
+        let t0: Symbol = topics.get(0).unwrap().try_into_val(&env).unwrap();
+        if t0 == symbol_short!("migr_set") {
+            found = true;
+        }
+    }
+    assert!(found, "migr_set event must be emitted");
+}
+
+#[test]
+fn test_execute_migration_rejected_before_timelock() {
+    let (env, client, actors) = setup();
+    let migr_addr = soroban_sdk::Address::generate(&env);
+    client.set_migration_key(&actors.admin, &migr_addr);
+
+    let result = client.try_execute_migration(&migr_addr);
+    assert!(result.is_err(), "migration must be rejected before 14-day timelock");
+}
+
+#[test]
+fn test_execute_migration_rejected_by_non_key_holder() {
+    let (env, client, actors) = setup();
+    let migr_addr = soroban_sdk::Address::generate(&env);
+    let other = soroban_sdk::Address::generate(&env);
+    client.set_migration_key(&actors.admin, &migr_addr);
+
+    let result = client.try_execute_migration(&other);
+    assert!(result.is_err(), "migration must be rejected by non-key holder");
+}
+
+// ============================================================
+// #578 – History pruning queue
+// ============================================================
+
+#[test]
+fn test_prune_history_queue_removes_oldest_when_over_limit() {
+    let (env, client, actors) = setup();
+    // Fill history with default limit (1000) to exceed future limit
+    for i in 0..60 {
+        let outage_id = symbol(&env, &format!("PRUNE_{}", i));
+        let _ = client.calculate_sla(
+            &actors.operator,
+            &outage_id,
+            &symbol_short!("high"),
+            &10,
+        );
+    }
+
+    // Lower retention limit (does not retroactively prune)
+    client.set_retention_limit(&actors.admin, &50);
+
+    let before = client.get_history();
+    assert!(before.len() > 50, "history should exceed limit before prune");
+
+    let pruned = client.prune_history_queue(&actors.admin);
+    assert!(pruned > 0, "should prune some entries");
+
+    let after = client.get_history();
+    assert!(after.len() <= 50, "history should be at or below limit after prune");
+}
+
+#[test]
+fn test_prune_history_queue_noop_when_under_limit() {
+    let (env, client, actors) = setup();
+    let _ = client.calculate_sla(
+        &actors.operator,
+        &symbol_short!("P1"),
+        &symbol_short!("high"),
+        &10,
+    );
+    let pruned = client.prune_history_queue(&actors.admin);
+    assert_eq!(pruned, 0, "no entries should be pruned when under limit");
+}
+
+// ============================================================
+// #579 – Storage retention limit configuration validator
+// ============================================================
+
+#[test]
+fn test_set_retention_limit_valid_range() {
+    let (env, client, actors) = setup();
+    client.set_retention_limit(&actors.admin, &50);
+    assert_eq!(client.get_retention_limit(), 50);
+
+    client.set_retention_limit(&actors.admin, &5000);
+    assert_eq!(client.get_retention_limit(), 5000);
+}
+
+#[test]
+fn test_set_retention_limit_below_minimum_rejected() {
+    let (env, client, actors) = setup();
+    let result = client.try_set_retention_limit(&actors.admin, &49);
+    assert!(result.is_err(), "limit below 50 must be rejected");
+}
+
+#[test]
+fn test_set_retention_limit_above_maximum_rejected() {
+    let (env, client, actors) = setup();
+    let result = client.try_set_retention_limit(&actors.admin, &5001);
+    assert!(result.is_err(), "limit above 5000 must be rejected");
+}
+
+#[test]
+fn test_set_retention_limit_non_admin_rejected() {
+    let (env, client, actors) = setup();
+    let result = client.try_set_retention_limit(&actors.operator, &100);
+    assert!(result.is_err(), "non-admin must be rejected");
 }
