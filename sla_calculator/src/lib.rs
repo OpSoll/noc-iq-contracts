@@ -543,6 +543,26 @@ impl SLACalculatorContract {
         Ok(())
     }
 
+    /// #575 – The current operator renounces their own role.
+    ///
+    /// Only the active operator may call this; a non-operator caller is rejected
+    /// with `Unauthorized`. Removes the operator address and any pending operator
+    /// proposal from storage, after which `calculate_sla` fails with
+    /// `Unauthorized` until a new operator is configured. Emits an `op_rev` event
+    /// carrying the renouncing caller as context.
+    pub fn renounce_operator(env: Env, caller: Address) -> Result<(), SLAError> {
+        Self::check_version(&env)?;
+        Self::require_operator(&env, &caller)?;
+
+        env.storage().instance().remove(&OPERATOR_KEY);
+        env.storage().instance().remove(&PENDING_OP_KEY);
+
+        env.events()
+            .publish((EVENT_OP_REV, EVENT_VERSION, caller), ());
+
+        Ok(())
+    }
+
     // -------------------------------------------------------------------
     // #63 – Two-step admin transfer
     // -------------------------------------------------------------------

@@ -8182,3 +8182,59 @@ fn test_257_hash_differs_across_all_four_severities() {
     let h4 = client.get_config_version_hash();
     assert_ne!(h3, h4);
 }
+
+// ============================================================
+// SC — Operator authorization lifecycle (#572 get_pending_operator,
+// #573 operator whitelist authorization, #574 revoke_operator,
+// #575 renounce_operator)
+// ============================================================
+
+#[test]
+fn test_sc572_get_pending_operator_reflects_proposal() {
+    let (env, client, actors) = setup();
+    assert!(client.get_pending_operator().is_none());
+    let candidate = soroban_sdk::Address::generate(&env);
+    client.propose_operator(&actors.admin, &candidate);
+    assert_eq!(client.get_pending_operator(), Some(candidate));
+}
+
+#[test]
+fn test_sc573_only_whitelisted_operator_is_authorized() {
+    // The active operator address is the authorization "whitelist" enforced by
+    // require_operator: after a handoff, only the new operator may calculate.
+    let (env, client, actors) = setup();
+    let new_op = soroban_sdk::Address::generate(&env);
+    client.set_operator(&actors.admin, &new_op);
+    let outage = symbol(&env, "outage1");
+    let severity = symbol_short!("critical");
+    client.calculate_sla(&new_op, &outage, &severity, &10u32);
+    let res = client.try_calculate_sla(&actors.operator, &outage, &severity, &10u32);
+    assert!(res.is_err());
+}
+
+#[test]
+fn test_sc574_admin_revoke_operator_removes_authorization() {
+    let (env, client, actors) = setup();
+    client.revoke_operator(&actors.admin);
+    let outage = symbol(&env, "outage1");
+    let severity = symbol_short!("critical");
+    let res = client.try_calculate_sla(&actors.operator, &outage, &severity, &10u32);
+    assert!(res.is_err());
+}
+
+#[test]
+fn test_sc575_operator_can_renounce_own_role() {
+    let (env, client, actors) = setup();
+    client.renounce_operator(&actors.operator);
+    let outage = symbol(&env, "outage1");
+    let severity = symbol_short!("critical");
+    let res = client.try_calculate_sla(&actors.operator, &outage, &severity, &10u32);
+    assert!(res.is_err());
+}
+
+#[test]
+#[should_panic]
+fn test_sc575_non_operator_cannot_renounce() {
+    let (_env, client, actors) = setup();
+    client.renounce_operator(&actors.stranger);
+}
