@@ -956,12 +956,12 @@ fn test_high_but_safe_reward_passes() {
         &100,
     );
 
-    // mttr=0 → top-tier reward = 100000 * 200 / 100 = 200000
+    // mttr=1 → top-tier reward = 100000 * 200 / 100 = 200000
     let result = client.calculate_sla(
         &actors.operator,
         &symbol_short!("SAFE001"),
         &symbol_short!("critical"),
-        &0,
+        &1,
     );
     assert_eq!(
         result.status,
@@ -1487,6 +1487,7 @@ fn test_empty_batch_rejected() {
     let empty_requests = Vec::<BatchRequest>::new(&env);
     let result = client.try_batch_calculate(&actors.operator, &empty_requests);
     assert!(result.is_err());
+    assert_eq!(result.unwrap_err().unwrap(), SLAError::ThresholdOutOfBounds);
 }
 
 #[test]
@@ -1503,6 +1504,7 @@ fn test_oversized_batch_rejected() {
     }
     let result = client.try_batch_calculate(&actors.operator, &requests);
     assert!(result.is_err());
+    assert_eq!(result.unwrap_err().unwrap(), SLAError::ThresholdOutOfBounds);
 }
 
 #[test]
@@ -1557,6 +1559,69 @@ fn test_batch_with_duplicate_outage_ids_rejected() {
     });
     let result = client.try_batch_calculate(&actors.operator, &requests);
     assert!(result.is_err());
+    assert_eq!(result.unwrap_err().unwrap(), SLAError::DuplicateOutageInput);
+}
+
+#[test]
+fn test_batch_summary_struct() {
+    let (env, client, actors) = setup();
+    let mut requests = Vec::<BatchRequest>::new(&env);
+    requests.push_back(BatchRequest {
+        outage_id: symbol_short!("MET01"),
+        severity: symbol_short!("high"),
+        mttr_minutes: 10,
+    });
+    requests.push_back(BatchRequest {
+        outage_id: symbol_short!("VIOL1"),
+        severity: symbol_short!("critical"),
+        mttr_minutes: 20,
+    });
+    let result = client.try_batch_calculate(&actors.operator, &requests);
+    assert!(result.is_ok());
+    let (summary, results) = result.unwrap().unwrap();
+    assert_eq!(summary.total, 2);
+    assert_eq!(summary.succeeded, 2);
+    assert_eq!(summary.failed, 0);
+    assert_eq!(summary.total_rewards, 1500);
+    assert_eq!(summary.total_penalties, -500);
+    assert_eq!(results.len(), 2);
+    assert!(results.get(0).unwrap().success);
+    assert!(results.get(1).unwrap().success);
+}
+
+#[test]
+fn test_batch_summary_struct_fields() {
+    let (env, client, actors) = setup();
+    let mut requests = Vec::<BatchRequest>::new(&env);
+    requests.push_back(BatchRequest {
+        outage_id: symbol(&env, "B1"),
+        severity: symbol_short!("high"),
+        mttr_minutes: 10,
+    });
+    requests.push_back(BatchRequest {
+        outage_id: symbol(&env, "B2"),
+        severity: symbol_short!("high"),
+        mttr_minutes: 60,
+    });
+    let (summary, results) = client.batch_calculate(&actors.operator, &requests);
+    assert_eq!(summary.total, 2);
+    assert_eq!(summary.succeeded, 2);
+    assert_eq!(summary.failed, 0);
+    assert_eq!(results.len(), 2);
+}
+
+#[test]
+fn test_batch_view_only_no_persist() {
+    let (env, client, _actors) = setup();
+    let mut requests = Vec::<BatchRequest>::new(&env);
+    requests.push_back(BatchRequest {
+        outage_id: symbol(&env, "V1"),
+        severity: symbol_short!("medium"),
+        mttr_minutes: 30,
+    });
+    let _ = client.batch_calculate_view(&requests);
+    let history = client.get_history();
+    assert_eq!(history.len(), 0);
 }
 
 #[test]
@@ -8184,6 +8249,49 @@ fn test_257_hash_differs_across_all_four_severities() {
 }
 
 // ============================================================
+// SC — Access-control coverage (#564 require_operator, #565 set_operator,
+// #566 cancel_admin_proposal, #567 cancel_operator_proposal)
+// ============================================================
+
+#[test]
+fn test_sc565_set_operator_updates_operator() {
+    let (env, client, actors) = setup();
+    let new_op = soroban_sdk::Address::generate(&env);
+    client.set_operator(&actors.admin, &new_op);
+    assert_eq!(client.get_operator(), new_op);
+}
+
+#[test]
+#[should_panic]
+fn test_sc564_require_operator_rejects_non_operator() {
+    let (env, client, actors) = setup();
+    let outage = symbol(&env, "outage1");
+    let severity = symbol_short!("critical");
+    // A non-operator caller must be rejected by require_operator inside calculate_sla.
+    client.calculate_sla(&actors.stranger, &outage, &severity, &10u32);
+}
+
+#[test]
+fn test_sc566_cancel_admin_proposal_clears_pending() {
+    let (env, client, actors) = setup();
+    let candidate = soroban_sdk::Address::generate(&env);
+    client.propose_admin(&actors.admin, &candidate);
+    assert!(client.get_pending_admin().is_some());
+    client.cancel_admin_proposal(&actors.admin);
+    assert!(client.get_pending_admin().is_none());
+}
+
+#[test]
+fn test_sc567_cancel_operator_proposal_clears_pending() {
+    let (env, client, actors) = setup();
+    let candidate = soroban_sdk::Address::generate(&env);
+    client.propose_operator(&actors.admin, &candidate);
+    assert!(client.get_pending_operator().is_some());
+    client.cancel_operator_proposal(&actors.admin);
+    assert!(client.get_pending_operator().is_none());
+}
+
+// ============================================================
 // #603 – InvalidRewardAmount error code variant
 // ============================================================
 
@@ -8627,6 +8735,76 @@ fn test_paused_contract_rejects_calculate() {
         &symbol_short!("high"),
         &25,
     );
+}
+
+// ============================================================
+// SC — Config getters & validators (#552 is_canonical_severity,
+// #553 version-hash collision resistance, #554 get_config, #555 list_configs)
+// ============================================================
+
+#[test]
+fn test_sc554_get_config_returns_per_severity_config() {
+    let (_env, client, _actors) = setup();
+    assert_eq!(
+        client
+            .get_config(&symbol_short!("critical"))
+            .threshold_minutes,
+        15
+    );
+    assert_eq!(
+        client.get_config(&symbol_short!("low")).threshold_minutes,
+        120
+    );
+}
+
+#[test]
+#[should_panic]
+fn test_sc554_get_config_unknown_severity_errors() {
+    let (env, client, _actors) = setup();
+    client.get_config(&symbol(&env, "bogus"));
+}
+
+#[test]
+fn test_sc555_list_configs_returns_all_four() {
+    let (_env, client, _actors) = setup();
+    let configs = client.list_configs();
+    assert_eq!(configs.len(), 4);
+    assert!(configs.contains_key(symbol_short!("critical")));
+    assert!(configs.contains_key(symbol_short!("low")));
+}
+
+#[test]
+#[should_panic]
+fn test_sc552_non_canonical_severity_rejected_by_set_config() {
+    let (env, client, actors) = setup();
+    client.set_config(
+        &actors.admin,
+        &symbol(&env, "urgent"),
+        &10u32,
+        &100i128,
+        &750i128,
+        &200u32,
+        &150u32,
+        &100u32,
+    );
+}
+
+#[test]
+fn test_sc553_config_hash_changes_when_threshold_mutated() {
+    let (_env, client, actors) = setup();
+    let before = client.get_config_version_hash();
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("critical"),
+        &14u32,
+        &100i128,
+        &750i128,
+        &200u32,
+        &150u32,
+        &100u32,
+    );
+    let after = client.get_config_version_hash();
+    assert_ne!(before, after);
 }
 
 // ============================================================
