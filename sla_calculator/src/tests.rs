@@ -9138,7 +9138,6 @@ fn test_sc562_threshold_to_seconds_multiplies_by_sixty() {
 }
 
 #[test]
-fn test_sc563_require_admin_rejects_non_admin_set_config() {
 fn test_sc557_validate_config_rejects_out_of_range_threshold() {
     let (_env, client, actors) = setup();
     let res = client.try_set_config(
@@ -9414,4 +9413,83 @@ fn test_set_retention_limit_non_admin_rejected() {
     let (env, client, actors) = setup();
     let result = client.try_set_retention_limit(&actors.operator, &100);
     assert!(result.is_err(), "non-admin must be rejected");
+}
+
+#[test]
+fn test_issue_527_saturating_add_prevents_overflow() {
+    let (env, client, actors) = setup();
+    
+    // Simulate setting a config that gives extreme rewards to trigger overflow
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("critical"),
+        &1u32,
+        &0i128,
+        &(i128::MAX - 100), // Huge reward
+        &200u32,
+        &150u32,
+        &100u32,
+    );
+
+    // Call it twice to cross the i128::MAX boundary
+    client.calculate_sla(&actors.operator, &symbol(&env, "INC_O1"), &symbol_short!("critical"), &0);
+    client.calculate_sla(&actors.operator, &symbol(&env, "INC_O2"), &symbol_short!("critical"), &0);
+
+    let stats = client.get_stats();
+    // It should cap at i128::MAX, not panic
+    assert_eq!(stats.total_rewards, i128::MAX);
+}
+
+#[test]
+fn test_issue_547_payload_size_test() {
+    let env = Env::default();
+    let mut results = soroban_sdk::Vec::new(&env);
+    
+    for i in 0..50 {
+        let mut sla_results = soroban_sdk::Vec::new(&env);
+        sla_results.push_back(crate::SLAResult {
+            outage_id: symbol(&env, &format!("INC{}", i)),
+            status: symbol_short!("met"),
+            mttr_minutes: 5,
+            threshold_minutes: 15,
+            amount: 100,
+            payment_type: symbol_short!("rew"),
+            rating: symbol_short!("top"),
+            config_version_hash: soroban_sdk::BytesN::from_array(&env, &[0; 32]),
+            recorded_at: 1000,
+        });
+
+        results.push_back(crate::batch::BatchResult {
+            outage_id: symbol(&env, &format!("INC{}", i)),
+            success: true,
+            result: sla_results,
+            error: None,
+        });
+    }
+
+    use soroban_sdk::xdr::ToXdr;
+    let serialized = results.to_xdr(&env);
+    assert!(serialized.len() < 10000, "Payload must be under 10KB");
+}
+
+#[test]
+fn test_issue_543_find_result_by_outage_id() {
+    let env = Env::default();
+    let mut results = soroban_sdk::Vec::new(&env);
+    
+    let target_id = symbol_short!("INC_T");
+    let mut sla_results = soroban_sdk::Vec::new(&env);
+    let target_result = crate::batch::BatchResult {
+        outage_id: target_id.clone(),
+        success: true,
+        result: sla_results,
+        error: None,
+    };
+    results.push_back(target_result.clone());
+
+    let found = crate::batch::find_result_by_outage_id(&results, &target_id);
+    assert_eq!(found, Some(target_result));
+
+    let not_found = crate::batch::find_result_by_outage_id(&results, &symbol_short!("MISSING"));
+    assert_eq!(not_found, None);
 }
