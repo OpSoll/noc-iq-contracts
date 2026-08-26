@@ -8938,8 +8938,7 @@ fn test_sc553_config_hash_changes_when_threshold_mutated() {
 
 // ============================================================
 // #620 – Proptest: SLA calculation deterministic reproducibility
-// ============================================================
-
+// =====================================================
 use proptest::prelude::*;
 
 proptest! {
@@ -8971,6 +8970,86 @@ proptest! {
     }
 }
 
+=======
+// SC — Config counter, backup/restore, conversion, admin guard
+// (#560 config_update_count, #561 export/import_config_map,
+// #562 threshold_to_seconds, #563 require_admin)
+// ============================================================
+
+#[test]
+fn test_sc560_config_update_count_increments() {
+    let (_env, client, actors) = setup();
+    assert_eq!(client.get_config_update_count(), 0);
+    assert_eq!(client.get_config_update_count(), 1);
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("high"),
+        &29u32,
+        &50i128,
+        &750i128,
+        &200u32,
+        &150u32,
+        &100u32,
+    );
+    assert_eq!(client.get_config_update_count(), 2);
+}
+
+#[test]
+fn test_sc561_export_import_config_map_round_trip() {
+    let (_env, client, actors) = setup();
+    let exported = client.export_config_map();
+    assert_eq!(exported.len(), 4);
+    client.import_config_map(&actors.admin, &exported);
+    assert_eq!(
+        client
+            .get_config(&symbol_short!("critical"))
+            .threshold_minutes,
+        15
+    );
+}
+
+#[test]
+fn test_sc561_import_empty_config_map_rejected() {
+    let (env, client, actors) = setup();
+    let empty: soroban_sdk::Map<Symbol, SLAConfig> = soroban_sdk::Map::new(&env);
+    let res = client.try_import_config_map(&actors.admin, &empty);
+    assert!(res.is_err());
+}
+
+#[test]
+fn test_sc561_import_config_map_requires_admin() {
+    let (_env, client, actors) = setup();
+    let exported = client.export_config_map();
+    let res = client.try_import_config_map(&actors.stranger, &exported);
+    assert!(res.is_err());
+}
+
+#[test]
+fn test_sc562_threshold_to_seconds_multiplies_by_sixty() {
+    let (_env, client, _actors) = setup();
+    assert_eq!(client.threshold_to_seconds(&15u32), 900u64);
+    assert_eq!(client.threshold_to_seconds(&0u32), 0u64);
+}
+
+#[test]
+fn test_sc563_require_admin_rejects_non_admin_set_config() {
+    let (_env, client, actors) = setup();
+    assert_eq!(
+        client.try_set_config(
+            &actors.stranger,
+            &symbol_short!("critical"),
+            &14u32,
+            &100i128,
+            &750i128,
+            &200u32,
+            &150u32,
+            &100u32,
+        ),
+        Err(Ok(SLAError::Unauthorized))
+    );
+}
+
+// ============================================================
 // SC — Operator authorization lifecycle (#572 get_pending_operator,
 // #573 operator whitelist authorization, #574 revoke_operator,
 // #575 renounce_operator)
