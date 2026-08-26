@@ -148,6 +148,23 @@ cargo test
 cargo clippy -- -D warnings
 ```
 
+### WASM Size Profiling
+
+Use `cargo-bloat` to identify the largest functions in the compiled WASM binary:
+
+```bash
+# Install cargo-bloat (one-time)
+cargo install cargo-bloat
+
+# Run the profiling script (shows top 20 functions by default)
+./scripts/profile_wasm_bloat.sh
+
+# Or show a custom number of top functions
+./scripts/profile_wasm_bloat.sh 50
+```
+
+This helps identify functions that contribute most to WASM binary size. Review the output before merging large features to ensure the contract stays within the 100 KB WASM budget.
+
 ### 4. Commit Your Changes
 
 We follow [Conventional Commits](https://www.conventionalcommits.org/):

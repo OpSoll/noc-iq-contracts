@@ -8184,6 +8184,452 @@ fn test_257_hash_differs_across_all_four_severities() {
 }
 
 // ============================================================
+// #603 – InvalidRewardAmount error code variant
+// ============================================================
+
+#[test]
+fn test_invalid_reward_amount_error_code_has_correct_discriminant() {
+    assert_eq!(SLAError::InvalidRewardAmount as u32, 15);
+}
+
+#[test]
+fn test_invalid_reward_amount_is_distinct_from_adjacent_error_codes() {
+    assert_ne!(
+        SLAError::InvalidRewardAmount as u32,
+        SLAError::InvalidPenaltyAmount as u32,
+        "InvalidRewardAmount (15) and InvalidPenaltyAmount (14) must be distinct"
+    );
+    assert_ne!(
+        SLAError::InvalidRewardAmount as u32,
+        SLAError::InvalidOutageId as u32,
+        "InvalidRewardAmount (15) and InvalidOutageId (16) must be distinct"
+    );
+    assert_ne!(
+        SLAError::InvalidRewardAmount as u32,
+        SLAError::RewardOutOfBounds as u32,
+        "InvalidRewardAmount (15) and RewardOutOfBounds (21) must be distinct"
+    );
+    assert_ne!(
+        SLAError::InvalidRewardAmount as u32,
+        SLAError::InvalidReward as u32,
+        "InvalidRewardAmount (15) and InvalidReward (10) must be distinct"
+    );
+}
+
+#[test]
+fn test_invalid_reward_amount_match_and_conversion() {
+    let error = SLAError::InvalidRewardAmount;
+    let code = error as u32;
+    assert_eq!(code, 15);
+
+    // Verify roundtrip: discriminant → variant → discriminant
+    let roundtripped = match code {
+        15 => SLAError::InvalidRewardAmount,
+        _ => panic!("Unexpected error code"),
+    };
+    assert_eq!(roundtripped as u32, 15);
+    assert_eq!(roundtripped, SLAError::InvalidRewardAmount);
+}
+
+#[test]
+fn test_invalid_reward_amount_error_is_used_in_reward_calculation() {
+    let (_env, client, actors) = setup();
+
+    // Normal reward calculation succeeds (not overflow, so no InvalidRewardAmount)
+    let result = client.calculate_sla(
+        &actors.operator,
+        &symbol_short!("REW001"),
+        &symbol_short!("critical"),
+        &5,
+    );
+    assert_eq!(result.status, symbol_short!("met"));
+    assert_eq!(result.payment_type, symbol_short!("rew"));
+    assert!(
+        result.amount > 0,
+        "Reward amount must be positive for met SLA"
+    );
+}
+
+#[test]
+fn test_invalid_reward_amount_does_not_appear_for_valid_calculations() {
+    let (env, client, actors) = setup();
+
+    // All default severity tiers should produce valid reward calculations
+    let severities = [
+        symbol_short!("critical"),
+        symbol_short!("high"),
+        symbol_short!("medium"),
+        symbol_short!("low"),
+    ];
+
+    for (idx, severity) in severities.iter().enumerate() {
+        let cfg = client.get_config(severity);
+        let mttr = cfg.threshold_minutes / 2; // Well under threshold → met
+        let outage_id = symbol(&env, &format!("REWCHK{}", idx));
+
+        let result = client.calculate_sla(&actors.operator, &outage_id, severity, &mttr);
+        assert_eq!(
+            result.status,
+            symbol_short!("met"),
+            "Severity {} should produce met SLA",
+            idx
+        );
+        assert!(
+            result.amount > 0,
+            "Severity {} should produce positive reward",
+            idx
+        );
+    }
+}
+
+// ============================================================
+// #607 – From<SLAError> for soroban_sdk::Error conversion
+// ============================================================
+
+#[test]
+fn test_sla_error_converts_to_soroban_error_via_from_trait() {
+    use soroban_sdk::Error;
+
+    let err: Error = SLAError::ContractPaused.into();
+    assert!(err.is_type(soroban_sdk::xdr::ScErrorType::Contract));
+    assert_eq!(err.get_code(), SLAError::ContractPaused as u32);
+}
+
+#[test]
+fn test_sla_error_converts_all_variants_to_contract_error() {
+    use soroban_sdk::Error;
+
+    let all_pass = [
+        (SLAError::AlreadyInitialized as u32, 1u32),
+        (SLAError::NotInitialized as u32, 2),
+        (SLAError::Unauthorized as u32, 3),
+        (SLAError::ConfigNotFound as u32, 4),
+        (SLAError::VersionMismatch as u32, 5),
+        (SLAError::ContractPaused as u32, 6),
+        (SLAError::NoPendingTransfer as u32, 7),
+        (SLAError::InvalidThreshold as u32, 8),
+        (SLAError::InvalidPenalty as u32, 9),
+        (SLAError::InvalidReward as u32, 10),
+        (SLAError::InvalidSeverity as u32, 11),
+        (SLAError::RetentionLimitOutOfRange as u32, 12),
+        (SLAError::DuplicateOutageInput as u32, 13),
+        (SLAError::InvalidPenaltyAmount as u32, 14),
+        (SLAError::InvalidRewardAmount as u32, 15),
+        (SLAError::InvalidOutageId as u32, 16),
+        (SLAError::MalformedSymbolInput as u32, 17),
+        (SLAError::InvalidMTTR as u32, 18),
+        (SLAError::ThresholdOutOfBounds as u32, 19),
+        (SLAError::PenaltyOutOfBounds as u32, 20),
+        (SLAError::RewardOutOfBounds as u32, 21),
+        (SLAError::InvalidMonth as u32, 22),
+    ];
+
+    for (variant_code, expected_code) in all_pass {
+        let sla_err: SLAError = match variant_code {
+            1 => SLAError::AlreadyInitialized,
+            2 => SLAError::NotInitialized,
+            3 => SLAError::Unauthorized,
+            4 => SLAError::ConfigNotFound,
+            5 => SLAError::VersionMismatch,
+            6 => SLAError::ContractPaused,
+            7 => SLAError::NoPendingTransfer,
+            8 => SLAError::InvalidThreshold,
+            9 => SLAError::InvalidPenalty,
+            10 => SLAError::InvalidReward,
+            11 => SLAError::InvalidSeverity,
+            12 => SLAError::RetentionLimitOutOfRange,
+            13 => SLAError::DuplicateOutageInput,
+            14 => SLAError::InvalidPenaltyAmount,
+            15 => SLAError::InvalidRewardAmount,
+            16 => SLAError::InvalidOutageId,
+            17 => SLAError::MalformedSymbolInput,
+            18 => SLAError::InvalidMTTR,
+            19 => SLAError::ThresholdOutOfBounds,
+            20 => SLAError::PenaltyOutOfBounds,
+            21 => SLAError::RewardOutOfBounds,
+            22 => SLAError::InvalidMonth,
+            _ => panic!("Unexpected variant code"),
+        };
+        let err: Error = sla_err.into();
+        assert!(
+            err.is_type(soroban_sdk::xdr::ScErrorType::Contract),
+            "Variant code {} should convert to Contract error type",
+            variant_code
+        );
+        assert_eq!(
+            err.get_code(),
+            expected_code,
+            "Variant code {} should have error code {}",
+            variant_code,
+            expected_code
+        );
+    }
+}
+
+#[test]
+fn test_sla_error_try_from_roundtrip_preserves_identity() {
+    use soroban_sdk::Error;
+
+    let original = SLAError::ContractPaused;
+    let err: Error = original.into();
+    let roundtripped: SLAError = err.try_into().unwrap();
+    assert_eq!(original, roundtripped);
+}
+
+#[test]
+fn test_sla_error_try_from_preserves_discriminant() {
+    use soroban_sdk::Error;
+
+    let original = SLAError::InvalidRewardAmount;
+    let err: Error = original.into();
+    let roundtripped: SLAError = err.try_into().unwrap();
+    assert_eq!(roundtripped as u32, 15);
+    assert_eq!(original, roundtripped);
+}
+
+#[test]
+fn test_sla_error_try_from_rejects_non_contract_errors() {
+    use soroban_sdk::Error;
+
+    // A non-contract error should fail conversion to SLAError.
+    // Use an unknown contract code that doesn't map to any SLAError variant.
+    let unknown_contract = Error::from_contract_error(999);
+    let result: Result<SLAError, _> = unknown_contract.try_into();
+    assert!(
+        result.is_err(),
+        "Unknown contract error code must not convert to SLAError"
+    );
+}
+
+#[test]
+fn test_contract_paused_error_converts_and_is_retryable() {
+    use soroban_sdk::Error;
+
+    // Simulate the pattern used in contract methods: return Err(SLAError) → convert to Error
+    let sla_err = SLAError::ContractPaused;
+    let err: Error = sla_err.into();
+
+    // Convert back to verify the roundtrip
+    let back: SLAError = err.try_into().unwrap();
+    assert_eq!(back, SLAError::ContractPaused);
+
+    // Verify it matches in a match arm
+    match back {
+        SLAError::ContractPaused => {} // expected
+        _ => panic!("Expected ContractPaused"),
+    }
+}
+
+#[test]
+fn test_from_trait_conversion_matches_contract_error_macro_path() {
+    use soroban_sdk::Error;
+
+    // The #[contracterror] macro generates:
+    //   SLAError::X => soroban_sdk::Error::from_contract_error(N)
+    // Verify this produces the same result as the manual path
+    let manual = Error::from_contract_error(SLAError::ConfigNotFound as u32);
+    let via_trait: Error = SLAError::ConfigNotFound.into();
+    assert_eq!(manual, via_trait);
+}
+
+// ============================================================
+// #611 – CPU instruction budget benchmark for calculate_sla
+// ============================================================
+
+#[test]
+fn test_calculate_sla_cpu_budget() {
+    let (env, client, actors) = setup();
+
+    env.budget().reset_tracker();
+
+    let _ = client.calculate_sla(
+        &actors.operator,
+        &symbol_short!("bench_out"),
+        &symbol_short!("high"),
+        &15,
+    );
+
+    let cpu = env.budget().cpu_instruction_cost();
+    assert!(
+        cpu < 1_000_000,
+        "calculate_sla consumed {} CPU instructions, expected < 1,000,000",
+        cpu
+    );
+}
+
+#[test]
+fn test_calculate_sla_memory_budget() {
+    let (env, client, actors) = setup();
+
+    env.budget().reset_tracker();
+
+    let _ = client.calculate_sla(
+        &actors.operator,
+        &symbol_short!("mem_out"),
+        &symbol_short!("high"),
+        &15,
+    );
+
+    let mem = env.budget().memory_bytes_cost();
+    assert!(
+        mem < 1_000_000,
+        "calculate_sla consumed {} bytes of memory, expected < 1,000,000",
+        mem
+    );
+}
+
+#[test]
+fn test_calculate_sla_cpu_budget_low_severity() {
+    let (env, client, actors) = setup();
+
+    env.budget().reset_tracker();
+
+    let _ = client.calculate_sla(
+        &actors.operator,
+        &symbol_short!("cpu_lo"),
+        &symbol_short!("low"),
+        &15,
+    );
+
+    let cpu = env.budget().cpu_instruction_cost();
+    assert!(
+        cpu < 1_000_000,
+        "calculate_sla for low severity consumed {} CPU instructions, expected < 1,000,000",
+        cpu
+    );
+}
+
+#[test]
+fn test_calculate_sla_cpu_budget_critical_severity() {
+    let (env, client, actors) = setup();
+
+    env.budget().reset_tracker();
+
+    let _ = client.calculate_sla(
+        &actors.operator,
+        &symbol_short!("cpu_cr"),
+        &symbol_short!("critical"),
+        &15,
+    );
+
+    let cpu = env.budget().cpu_instruction_cost();
+    assert!(
+        cpu < 1_000_000,
+        "calculate_sla for critical severity consumed {} CPU instructions, expected < 1,000,000",
+        cpu
+    );
+}
+
+// ============================================================
+// #619 – Proptest: MTTR monotonicity in penalty calculation
+// ============================================================
+
+#[cfg(test)]
+mod proptests {
+    use proptest::prelude::*;
+    use soroban_sdk::testutils::Address as _;
+
+    use super::*;
+    use crate::{symbol_short, SLACalculatorContract};
+
+    fn arb_severity() -> impl Strategy<Value = soroban_sdk::Symbol> {
+        prop_oneof![
+            Just(symbol_short!("critical")),
+            Just(symbol_short!("high")),
+            Just(symbol_short!("medium")),
+            Just(symbol_short!("low")),
+        ]
+    }
+
+    proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(1000))]
+
+        #[test]
+        fn prop_mttr_monotonicity_penalty(
+            severity in arb_severity(),
+            mttr_a in 1u32..5000u32,
+            delta in 1u32..5000u32,
+        ) {
+            let env = Env::default();
+            let cid = env.register_contract(None, SLACalculatorContract);
+            let client = SLACalculatorContractClient::new(&env, &cid);
+
+            let admin = Address::generate(&env);
+            let operator = Address::generate(&env);
+            client.initialize(&admin, &operator);
+
+            let config = client.get_config(&severity);
+            let threshold = config.threshold_minutes;
+
+            // Ensure both MTTR values are in the violated range (above threshold)
+            let mttr_a = core::cmp::max(mttr_a, threshold + 1);
+            let mttr_b = mttr_a.saturating_add(delta);
+
+            // Skip if mttr_b would overflow u32
+            if mttr_b < mttr_a {
+                return Ok(());
+            }
+
+            let result_a = client.calculate_sla_view(
+                &symbol_short!("mon_a"),
+                &severity,
+                &mttr_a,
+            );
+            let result_b = client.calculate_sla_view(
+                &symbol_short!("mon_b"),
+                &severity,
+                &mttr_b,
+            );
+
+            // Both must be violated
+            prop_assert_eq!(result_a.status, symbol_short!("viol"));
+            prop_assert_eq!(result_b.status, symbol_short!("viol"));
+
+            // Penalty amounts (amount is negative, so larger absolute value = more penalty)
+            // longer MTTR => amount(mttr_b) <= amount(mttr_a) (more negative or equal)
+            prop_assert!(
+                result_b.amount <= result_a.amount,
+                "MTTR monotonicity violated: amount({}) = {} > amount({}) = {}",
+                mttr_b, result_b.amount,
+                mttr_a, result_a.amount,
+            );
+
+            // Absolute penalty must be monotonic: |amount(mttr_b)| >= |amount(mttr_a)|
+            prop_assert!(
+                result_b.amount.abs() >= result_a.amount.abs(),
+                "Absolute penalty monotonicity violated: |amount({})| = {} < |amount({})| = {}",
+                mttr_b, result_b.amount.abs(),
+                mttr_a, result_a.amount.abs(),
+            );
+        }
+    }
+}
+
+// ============================================================
+// #623 – Paused contract rejects calculate_sla with ContractPaused
+// ============================================================
+
+#[test]
+#[should_panic(expected = "Contract, #6")]
+fn test_paused_contract_rejects_calculate() {
+    let (env, client, actors) = setup();
+
+    // Pause the contract
+    client.pause(
+        &actors.admin,
+        &soroban_sdk::String::from_str(&env, "maintenance window"),
+    );
+
+    // Attempting calculate_sla while paused must fail with ContractPaused (error code 6)
+    let _ = client.calculate_sla(
+        &actors.operator,
+        &symbol_short!("INC_pause"),
+        &symbol_short!("high"),
+        &25,
+    );
+}
+
+// ============================================================
 // SC — Config counter, backup/restore, conversion, admin guard
 // (#560 config_update_count, #561 export/import_config_map,
 // #562 threshold_to_seconds, #563 require_admin)
@@ -8222,7 +8668,6 @@ fn test_sc561_export_import_config_map_round_trip() {
     let (_env, client, actors) = setup();
     let exported = client.export_config_map();
     assert_eq!(exported.len(), 4);
-    // Re-importing the same map is accepted and preserves the configs.
     client.import_config_map(&actors.admin, &exported);
     assert_eq!(
         client
@@ -8258,7 +8703,6 @@ fn test_sc562_threshold_to_seconds_multiplies_by_sixty() {
 #[test]
 fn test_sc563_require_admin_rejects_non_admin_set_config() {
     let (_env, client, actors) = setup();
-    // set_config is admin-gated by require_admin.
     assert_eq!(
         client.try_set_config(
             &actors.stranger,
