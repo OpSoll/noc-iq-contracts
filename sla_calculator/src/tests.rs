@@ -1599,6 +1599,41 @@ fn test_batch_summary_struct() {
 }
 
 #[test]
+fn test_batch_summary_struct_fields() {
+    let (env, client, actors) = setup();
+    let mut requests = Vec::<BatchRequest>::new(&env);
+    requests.push_back(BatchRequest {
+        outage_id: symbol(&env, "B1"),
+        severity: symbol_short!("high"),
+        mttr_minutes: 10,
+    });
+    requests.push_back(BatchRequest {
+        outage_id: symbol(&env, "B2"),
+        severity: symbol_short!("high"),
+        mttr_minutes: 60,
+    });
+    let (summary, results) = client.batch_calculate(&actors.operator, &requests);
+    assert_eq!(summary.total, 2);
+    assert_eq!(summary.succeeded, 2);
+    assert_eq!(summary.failed, 0);
+    assert_eq!(results.len(), 2);
+}
+
+#[test]
+fn test_batch_view_only_no_persist() {
+    let (env, client, _actors) = setup();
+    let mut requests = Vec::<BatchRequest>::new(&env);
+    requests.push_back(BatchRequest {
+        outage_id: symbol(&env, "V1"),
+        severity: symbol_short!("medium"),
+        mttr_minutes: 30,
+    });
+    let _ = client.batch_calculate_view(&requests);
+    let history = client.get_history();
+    assert_eq!(history.len(), 0);
+}
+
+#[test]
 fn test_config_version_hash_collision_resistance() {
     let (_env, client, actors) = setup();
     let initial_hash = client.get_config_version_hash();
