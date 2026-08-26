@@ -503,6 +503,20 @@ impl SLACalculatorContract {
             .ok_or(SLAError::NotInitialized)
     }
 
+    /// #569 – Soroban address authorization check.
+    ///
+    /// Enforces that `caller` actually authorized this invocation via
+    /// `require_auth()` (not merely that the passed address string matches),
+    /// then verifies the caller holds the admin role. Returns `Unauthorized`
+    /// for any non-admin caller. This is the on-chain authorization primitive
+    /// admin-gated entry points should build on.
+    pub fn verify_admin_auth(env: Env, caller: Address) -> Result<(), SLAError> {
+        caller.require_auth();
+        Self::check_version(&env)?;
+        Self::require_admin(&env, &caller)?;
+        Ok(())
+    }
+
     // -------------------------------------------------------------------
     // #28 – Operator management (admin only)
     // -------------------------------------------------------------------

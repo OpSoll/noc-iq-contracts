@@ -8182,3 +8182,57 @@ fn test_257_hash_differs_across_all_four_severities() {
     let h4 = client.get_config_version_hash();
     assert_ne!(h3, h4);
 }
+
+// ============================================================
+// SC — Auth & admin governance (#568 proposal expiration,
+// #569 require_auth address check, #570 role error taxonomy,
+// #571 get_pending_admin)
+// ============================================================
+
+#[test]
+fn test_sc569_verify_admin_auth_succeeds_with_authorization() {
+    let (env, client, actors) = setup();
+    env.mock_all_auths();
+    // require_auth() + admin role both satisfied.
+    client.verify_admin_auth(&actors.admin);
+}
+
+#[test]
+fn test_sc569_verify_admin_auth_rejects_non_admin() {
+    let (env, client, actors) = setup();
+    env.mock_all_auths();
+    let res = client.try_verify_admin_auth(&actors.stranger);
+    assert!(res.is_err());
+}
+
+#[test]
+fn test_sc571_get_pending_admin_reflects_proposal() {
+    let (env, client, actors) = setup();
+    assert!(client.get_pending_admin().is_none());
+    let candidate = soroban_sdk::Address::generate(&env);
+    client.propose_admin(&actors.admin, &candidate);
+    assert_eq!(client.get_pending_admin(), Some(candidate));
+}
+
+#[test]
+fn test_sc568_pending_admin_proposal_expires() {
+    let (env, client, actors) = setup();
+    env.ledger().set_timestamp(1000);
+    let candidate = soroban_sdk::Address::generate(&env);
+    client.propose_admin(&actors.admin, &candidate);
+    assert!(client.get_pending_admin().is_some());
+    // Advance beyond PROPOSAL_EXPIRATION_SECONDS (7 days).
+    env.ledger().set_timestamp(1000 + 604_800 + 1);
+    assert!(client.get_pending_admin().is_none());
+}
+
+#[test]
+fn test_sc570_role_error_taxonomy_unauthorized() {
+    let (env, client, actors) = setup();
+    let new_op = soroban_sdk::Address::generate(&env);
+    // Non-admin set_operator surfaces the Unauthorized taxonomy variant.
+    assert_eq!(
+        client.try_set_operator(&actors.stranger, &new_op),
+        Err(Ok(SLAError::Unauthorized))
+    );
+}
