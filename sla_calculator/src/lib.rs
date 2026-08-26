@@ -2449,3 +2449,34 @@ impl SLACalculatorContract {
         Ok(remove_count)
     }
 }
+
+/// Computes the integer square root of a 128-bit unsigned integer
+/// for quadratic SLA penalty scaling curves.
+pub fn isqrt(n: u128) -> u128 {
+    if n == 0 {
+        return 0;
+    }
+    if n == 1 {
+        return 1;
+    }
+
+    let mut low: u128 = 1;
+    let mut high: u128 = n / 2 + 1;
+    let mut ans: u128 = 0;
+
+    while low <= high {
+        let mid = low + (high - low) / 2;
+        // Check mid * mid <= n without overflowing by using division
+        if mid <= n / mid {
+            ans = mid;
+            low = mid + 1;
+        } else {
+            if mid == 0 {
+                break;
+            }
+            high = mid - 1;
+        }
+    }
+
+    ans
+}
