@@ -8938,8 +8938,7 @@ fn test_sc553_config_hash_changes_when_threshold_mutated() {
 
 // ============================================================
 // #620 – Proptest: SLA calculation deterministic reproducibility
-// ============================================================
-
+// =====================================================
 use proptest::prelude::*;
 
 proptest! {
@@ -8971,6 +8970,119 @@ proptest! {
     }
 }
 
+=======
+// SC — Config update guards (#556 idempotency, #557 validate_config,
+// #558 cross-severity monotonicity, #559 admin authorization)
+// ============================================================
+
+#[test]
+fn test_sc556_identical_config_update_is_idempotent_noop() {
+    let (env, client, actors) = setup();
+    let before = env.events().all().len();
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("critical"),
+        &15u32,
+        &100i128,
+        &750i128,
+        &200u32,
+        &150u32,
+        &100u32,
+    );
+    let after = env.events().all().len();
+    assert_eq!(
+        before, after,
+        "idempotent re-set must not emit an update event"
+    );
+}
+
+#[test]
+fn test_sc556_changed_config_update_emits_event() {
+    let (env, client, actors) = setup();
+    let before = env.events().all().len();
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("critical"),
+        &14u32,
+        &100i128,
+        &750i128,
+        &200u32,
+        &150u32,
+        &100u32,
+    );
+    assert!(env.events().all().len() > before);
+}
+
+#[test]
+fn test_sc558_monotonic_update_is_accepted() {
+    let (_env, client, actors) = setup();
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("high"),
+        &25u32,
+        &50i128,
+        &750i128,
+        &200u32,
+        &150u32,
+        &100u32,
+    );
+    assert_eq!(
+        client.get_config(&symbol_short!("high")).threshold_minutes,
+        25
+    );
+}
+
+#[test]
+fn test_sc558_cross_severity_inversion_rejected() {
+    let (_env, client, actors) = setup();
+    let res = client.try_set_config(
+        &actors.admin,
+        &symbol_short!("high"),
+        &10u32,
+        &60i128,
+        &750i128,
+        &200u32,
+        &150u32,
+        &100u32,
+    );
+    assert!(res.is_err());
+}
+
+#[test]
+fn test_sc557_validate_config_rejects_out_of_range_threshold() {
+    let (_env, client, actors) = setup();
+    let res = client.try_set_config(
+        &actors.admin,
+        &symbol_short!("critical"),
+        &0u32,
+        &100i128,
+        &750i128,
+        &200u32,
+        &150u32,
+        &100u32,
+    );
+    assert!(res.is_err());
+}
+
+#[test]
+fn test_sc559_set_config_requires_admin() {
+    let (_env, client, actors) = setup();
+    assert_eq!(
+        client.try_set_config(
+            &actors.stranger,
+            &symbol_short!("critical"),
+            &14u32,
+            &100i128,
+            &750i128,
+            &200u32,
+            &150u32,
+            &100u32,
+        ),
+        Err(Ok(SLAError::Unauthorized))
+    );
+}
+
+// ============================================================
 // SC — Operator authorization lifecycle (#572 get_pending_operator,
 // #573 operator whitelist authorization, #574 revoke_operator,
 // #575 renounce_operator)
