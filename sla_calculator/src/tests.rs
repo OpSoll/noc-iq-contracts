@@ -8249,8 +8249,130 @@ fn test_257_hash_differs_across_all_four_severities() {
 }
 
 // ============================================================
-// SC — Access-control coverage (#564 require_operator, #565 set_operator,
-// #566 cancel_admin_proposal, #567 cancel_operator_proposal)
+// #593 – Standardized event topics structure verification
+// ============================================================
+
+#[test]
+fn test_event_topics_follow_three_tuple_format() {
+    let (env, client, actors) = setup();
+
+    let _result = client.calculate_sla(
+        &actors.operator,
+        &symbol_short!("OUT01"),
+        &symbol_short!("high"),
+        &10,
+    );
+
+    let events = env.events().all();
+    let mut found_sla_calc = false;
+    for i in 0..events.len() {
+        let (_, topics, _) = events.get(i).unwrap();
+        let t0: Symbol = topics.get(0).unwrap().try_into_val(&env).unwrap();
+        if t0 == symbol_short!("sla_calc") {
+            found_sla_calc = true;
+            assert_eq!(topics.len(), 3, "sla_calc must have exactly 3 topic elements");
+            let t1: Symbol = topics.get(1).unwrap().try_into_val(&env).unwrap();
+            assert_eq!(t1, EVENT_VERSION);
+        }
+    }
+    assert!(found_sla_calc, "sla_calc event must be emitted");
+}
+
+// ============================================================
+// #594 – SLA violation event emission
+// ============================================================
+
+#[test]
+fn test_sla_violated_event_emitted_on_breach() {
+    let (env, client, actors) = setup();
+    let result = client.calculate_sla(
+        &actors.operator,
+        &symbol_short!("OUT_V1"),
+        &symbol_short!("high"),
+        &60,
+    );
+    assert_eq!(result.status, symbol_short!("viol"));
+
+    let events = env.events().all();
+    let mut found_viol = false;
+    for i in 0..events.len() {
+        let (_, topics, data) = events.get(i).unwrap();
+        let t0: Symbol = topics.get(0).unwrap().try_into_val(&env).unwrap();
+        if t0 == symbol_short!("sla_viol") {
+            found_viol = true;
+            let t1: Symbol = topics.get(1).unwrap().try_into_val(&env).unwrap();
+            assert_eq!(t1, EVENT_VERSION);
+            let t2: Symbol = topics.get(2).unwrap().try_into_val(&env).unwrap();
+            assert_eq!(t2, symbol_short!("OUT_V1"));
+            let payload: (u32, u32, i128) = data.try_into_val(&env).unwrap();
+            assert!(payload.2 < 0, "violation amount must be negative");
+        }
+    }
+    assert!(found_viol, "sla_viol event must be emitted for breach");
+}
+
+// ============================================================
+// #595 – SLA met event emission
+// ============================================================
+
+#[test]
+fn test_sla_met_event_emitted_when_met() {
+    let (env, client, actors) = setup();
+    let result = client.calculate_sla(
+        &actors.operator,
+        &symbol_short!("OUT_M1"),
+        &symbol_short!("high"),
+        &10,
+    );
+    assert_eq!(result.status, symbol_short!("met"));
+
+    let events = env.events().all();
+    let mut found_met = false;
+    for i in 0..events.len() {
+        let (_, topics, data) = events.get(i).unwrap();
+        let t0: Symbol = topics.get(0).unwrap().try_into_val(&env).unwrap();
+        if t0 == symbol_short!("sla_met") {
+            found_met = true;
+            let t1: Symbol = topics.get(1).unwrap().try_into_val(&env).unwrap();
+            assert_eq!(t1, EVENT_VERSION);
+            let t2: Symbol = topics.get(2).unwrap().try_into_val(&env).unwrap();
+            assert_eq!(t2, symbol_short!("OUT_M1"));
+            let payload: (u32, u32, i128) = data.try_into_val(&env).unwrap();
+            assert!(payload.2 > 0, "reward amount must be positive");
+        }
+    }
+    assert!(found_met, "sla_met event must be emitted when SLA is met");
+}
+
+// ============================================================
+// #596 – Error code discriminant mapping
+// ============================================================
+
+#[test]
+fn test_error_code_discriminants_match_expected_values() {
+    assert_eq!(SLAError::AlreadyInitialized as u32, 1);
+    assert_eq!(SLAError::NotInitialized as u32, 2);
+    assert_eq!(SLAError::Unauthorized as u32, 3);
+    assert_eq!(SLAError::ConfigNotFound as u32, 4);
+    assert_eq!(SLAError::VersionMismatch as u32, 5);
+    assert_eq!(SLAError::ContractPaused as u32, 6);
+    assert_eq!(SLAError::NoPendingTransfer as u32, 7);
+    assert_eq!(SLAError::InvalidThreshold as u32, 8);
+    assert_eq!(SLAError::InvalidPenalty as u32, 9);
+    assert_eq!(SLAError::InvalidReward as u32, 10);
+    assert_eq!(SLAError::InvalidSeverity as u32, 11);
+    assert_eq!(SLAError::RetentionLimitOutOfRange as u32, 12);
+    assert_eq!(SLAError::DuplicateOutageInput as u32, 13);
+    assert_eq!(SLAError::InvalidPenaltyAmount as u32, 14);
+    assert_eq!(SLAError::InvalidRewardAmount as u32, 15);
+    assert_eq!(SLAError::InvalidOutageId as u32, 16);
+    assert_eq!(SLAError::MalformedSymbolInput as u32, 17);
+    assert_eq!(SLAError::InvalidMTTR as u32, 18);
+    assert_eq!(SLAError::ThresholdOutOfBounds as u32, 19);
+    assert_eq!(SLAError::PenaltyOutOfBounds as u32, 20);
+    assert_eq!(SLAError::RewardOutOfBounds as u32, 21);
+    assert_eq!(SLAError::InvalidMonth as u32, 22);
+}
 // ============================================================
 
 #[test]
