@@ -9415,3 +9415,31 @@ fn test_set_retention_limit_non_admin_rejected() {
     let result = client.try_set_retention_limit(&actors.operator, &100);
     assert!(result.is_err(), "non-admin must be rejected");
 }
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use soroban_sdk::{Env, Vec};
+
+    #[test]
+    fn test_batch_execution_timestamp_recording() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        // Set a deterministic ledger timestamp for testing
+        env.ledger().set_timestamp(1710000000);
+
+        let mut item_ids = Vec::new(&env);
+        item_ids.push_back(101);
+        item_ids.push_back(102);
+
+        let results = BatchExecutionManager::process_batch(&env, item_ids);
+
+        assert_eq!(results.len(), 2);
+        
+        for result in results.iter() {
+            assert_eq!(result.recorded_at, 1710000000);
+            assert!(result.success);
+        }
+    }
+}
