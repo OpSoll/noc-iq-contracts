@@ -134,6 +134,10 @@ pub const EVENT_OP_PROP: Symbol = symbol_short!("op_prop");
 pub const EVENT_OP_ACC: Symbol = symbol_short!("op_acc");
 #[allow(dead_code)]
 pub const EVENT_OP_CAN: Symbol = symbol_short!("op_can");
+#[allow(dead_code)]
+pub const EVENT_SLA_VIOLATED: Symbol = symbol_short!("sla_viol"); // #594
+#[allow(dead_code)]
+pub const EVENT_SLA_MET: Symbol = symbol_short!("sla_met"); // #595
 
 /// Returns the canonical event version string for consumer documentation.
 #[allow(dead_code)]
@@ -171,6 +175,8 @@ mod tests {
             EVENT_OP_PROP,
             EVENT_OP_ACC,
             EVENT_OP_CAN,
+            EVENT_SLA_VIOLATED,
+            EVENT_SLA_MET,
         ];
 
         for i in 0..names.len() {
