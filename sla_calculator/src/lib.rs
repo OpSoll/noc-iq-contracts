@@ -559,6 +559,26 @@ impl SLACalculatorContract {
         Ok(())
     }
 
+    /// #575 – The current operator renounces their own role.
+    ///
+    /// Only the active operator may call this; a non-operator caller is rejected
+    /// with `Unauthorized`. Removes the operator address and any pending operator
+    /// proposal from storage, after which `calculate_sla` fails with
+    /// `Unauthorized` until a new operator is configured. Emits an `op_rev` event
+    /// carrying the renouncing caller as context.
+    pub fn renounce_operator(env: Env, caller: Address) -> Result<(), SLAError> {
+        Self::check_version(&env)?;
+        Self::require_operator(&env, &caller)?;
+
+        env.storage().instance().remove(&OPERATOR_KEY);
+        env.storage().instance().remove(&PENDING_OP_KEY);
+
+        env.events()
+            .publish((EVENT_OP_REV, EVENT_VERSION, caller), ());
+
+        Ok(())
+    }
+
     // -------------------------------------------------------------------
     // #63 – Two-step admin transfer
     // -------------------------------------------------------------------
@@ -987,11 +1007,7 @@ impl SLACalculatorContract {
             (14, "InvalidPenaltyAmount", "Invalid penalty amount"),
             (15, "InvalidRewardAmount", "Invalid reward amount"),
             (16, "InvalidOutageId", "Outage ID rejected by validator"),
-            (
-                17,
-                "MalformedSymbolInput",
-                "Symbol contains invalid chars",
-            ),
+            (17, "MalformedSymbolInput", "Symbol contains invalid chars"),
             (18, "InvalidMTTR", "MTTR must be greater than zero"),
             (19, "ThresholdOutOfBounds", "Threshold out of bounds"),
             (20, "PenaltyOutOfBounds", "Penalty out of bounds"),
@@ -1488,8 +1504,9 @@ impl SLACalculatorContract {
             })
         } else {
             // Case 2: SLA met → reward
-            let performance_ratio =
-                (mttr_minutes as i128).saturating_mul(100).div_euclid(threshold as i128);
+            let performance_ratio = (mttr_minutes as i128)
+                .saturating_mul(100)
+                .div_euclid(threshold as i128);
 
             let (multiplier, rating) = if performance_ratio < 50 {
                 (cfg.top_tier_multiplier, symbol_short!("top"))
