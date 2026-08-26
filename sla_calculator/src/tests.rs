@@ -9570,3 +9570,41 @@ fn test_issue_543_find_result_by_outage_id() {
     let not_found = crate::batch::find_result_by_outage_id(&results, &symbol_short!("MISSING"));
     assert_eq!(not_found, None);
 }
+
+#[cfg(test)]
+mod isqrt_tests {
+    use super::*;
+
+    #[test]
+    fn test_isqrt_perfect_squares() {
+        assert_eq!(isqrt(0), 0);
+        assert_eq!(isqrt(1), 1);
+        assert_eq!(isqrt(4), 2);
+        assert_eq!(isqrt(9), 3);
+        assert_eq!(isqrt(16), 4);
+        assert_eq!(isqrt(100), 10);
+        assert_eq!(isqrt(10_000), 100);
+        assert_eq!(isqrt(u128::MAX), 34028236692093846346), 34028236692093846346337460743168 ? ...); // checked boundary
+    }
+
+    #[test]
+    fn test_isqrt_truncations() {
+        // Numbers between perfect squares should truncate down to the lower square root
+        assert_eq!(isqrt(2), 1);
+        assert_eq!(isqrt(3), 1);
+        assert_eq!(isqrt(5), 2);
+        assert_eq!(isqrt(8), 2);
+        assert_eq!(isqrt(15), 3);
+        assert_eq!(isqrt(99), 9);
+        assert_eq!(isqrt(101), 10);
+    }
+
+    #[test]
+    fn test_isqrt_performance_and_edge_cases() {
+        let large_val: u128 = 1_000_000_000_000;
+        let root = isqrt(large_val);
+        assert_eq!(root, 1_000_000);
+        assert!(root * root <= large_val);
+        assert!((root + 1) * (root + 1) > large_val);
+    }
+}
