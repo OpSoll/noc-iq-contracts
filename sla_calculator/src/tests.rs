@@ -956,12 +956,12 @@ fn test_high_but_safe_reward_passes() {
         &100,
     );
 
-    // mttr=0 → top-tier reward = 100000 * 200 / 100 = 200000
+    // mttr=1 → top-tier reward = 100000 * 200 / 100 = 200000
     let result = client.calculate_sla(
         &actors.operator,
         &symbol_short!("SAFE001"),
         &symbol_short!("critical"),
-        &0,
+        &1,
     );
     assert_eq!(
         result.status,
@@ -1487,6 +1487,10 @@ fn test_empty_batch_rejected() {
     let empty_requests = Vec::<BatchRequest>::new(&env);
     let result = client.try_batch_calculate(&actors.operator, &empty_requests);
     assert!(result.is_err());
+    assert_eq!(
+        result.unwrap_err().unwrap(),
+        SLAError::ThresholdOutOfBounds
+    );
 }
 
 #[test]
@@ -1503,6 +1507,10 @@ fn test_oversized_batch_rejected() {
     }
     let result = client.try_batch_calculate(&actors.operator, &requests);
     assert!(result.is_err());
+    assert_eq!(
+        result.unwrap_err().unwrap(),
+        SLAError::ThresholdOutOfBounds
+    );
 }
 
 #[test]
@@ -1557,6 +1565,37 @@ fn test_batch_with_duplicate_outage_ids_rejected() {
     });
     let result = client.try_batch_calculate(&actors.operator, &requests);
     assert!(result.is_err());
+    assert_eq!(
+        result.unwrap_err().unwrap(),
+        SLAError::DuplicateOutageInput
+    );
+}
+
+#[test]
+fn test_batch_summary_struct() {
+    let (env, client, actors) = setup();
+    let mut requests = Vec::<BatchRequest>::new(&env);
+    requests.push_back(BatchRequest {
+        outage_id: symbol_short!("MET01"),
+        severity: symbol_short!("high"),
+        mttr_minutes: 10,
+    });
+    requests.push_back(BatchRequest {
+        outage_id: symbol_short!("VIOL1"),
+        severity: symbol_short!("critical"),
+        mttr_minutes: 20,
+    });
+    let result = client.try_batch_calculate(&actors.operator, &requests);
+    assert!(result.is_ok());
+    let (summary, results) = result.unwrap().unwrap();
+    assert_eq!(summary.total, 2);
+    assert_eq!(summary.succeeded, 2);
+    assert_eq!(summary.failed, 0);
+    assert_eq!(summary.total_rewards, 1500);
+    assert_eq!(summary.total_penalties, -500);
+    assert_eq!(results.len(), 2);
+    assert!(results.get(0).unwrap().success);
+    assert!(results.get(1).unwrap().success);
 }
 
 #[test]
