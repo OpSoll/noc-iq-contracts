@@ -9443,3 +9443,20 @@ mod test {
         }
     }
 }
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn test_sla_rating_classification() {
+        assert_eq!(SLARatingClassifier::classify_sla(100), SLARating::Top);
+        assert_eq!(SLARatingClassifier::classify_sla(99), SLARating::Top);
+        assert_eq!(SLARatingClassifier::classify_sla(97), SLARating::Excel);
+        assert_eq!(SLARatingClassifier::classify_sla(92), SLARating::Good);
+        assert_eq!(SLARatingClassifier::classify_sla(85), SLARating::Viol);
+
+        // Verify symbol mappings
+        assert_eq!(SLARatingClassifier::to_symbol(&SLARating::Top), symbol_short!("top"));
+        assert_eq!(SLARatingClassifier::to_symbol(&SLARating::Viol), symbol_short!("viol"));
+    }
+}
