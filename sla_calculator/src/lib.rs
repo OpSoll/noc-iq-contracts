@@ -175,7 +175,7 @@ pub struct SLAResult {
     pub amount: i128,             // negative = penalty, positive = reward
     pub payment_type: Symbol,     // "rew" | "pen"
     pub rating: Symbol,           // "top" | "excel" | "good" | "poor"
-    pub config_version_hash: u64, // deterministic binding to config used for evaluation
+    pub config_version_hash: soroban_sdk::BytesN<32>, // deterministic binding to config used for evaluation
     pub recorded_at: u64,         // SC-063: ledger timestamp at calculation time
 }
 
@@ -334,6 +334,15 @@ pub struct HistorySummary {
     pub total: u32,
     pub met: u32,
     pub violated: u32,
+}
+
+use soroban_sdk::xdr::ToXdr;
+
+pub fn compute_config_version_hash(
+    env: &Env,
+    configs: &soroban_sdk::Map<Symbol, SLAConfig>,
+) -> soroban_sdk::BytesN<32> {
+    env.crypto().sha256(&configs.to_xdr(env))
 }
 
 // -----------------------------------------------------------------------
