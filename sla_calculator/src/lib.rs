@@ -863,17 +863,24 @@ impl SLACalculatorContract {
             &configs,
         )?;
 
-        configs.set(
-            severity.clone(),
-            SLAConfig {
-                threshold_minutes,
-                penalty_per_minute,
-                reward_base,
-                top_tier_multiplier,
-                excel_tier_multiplier,
-                good_tier_multiplier,
-            },
-        );
+        let new_config = SLAConfig {
+            threshold_minutes,
+            penalty_per_minute,
+            reward_base,
+            top_tier_multiplier,
+            excel_tier_multiplier,
+            good_tier_multiplier,
+        };
+
+        // #556 – idempotency: a re-submission of the identical configuration for
+        // this severity is a no-op (no storage write, no event emitted).
+        if let Some(existing) = configs.get(severity.clone()) {
+            if existing == new_config {
+                return Ok(());
+            }
+        }
+
+        configs.set(severity.clone(), new_config);
         env.storage().instance().set(&CONFIG_KEY, &configs);
 
         // #560 – track total successful configuration updates.

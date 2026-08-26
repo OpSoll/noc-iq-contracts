@@ -8974,8 +8974,7 @@ proptest! {
 // SC — Config counter, backup/restore, conversion, admin guard
 // (#560 config_update_count, #561 export/import_config_map,
 // #562 threshold_to_seconds, #563 require_admin)
-// ============================================================
-
+// =====================================================
 #[test]
 fn test_sc560_config_update_count_increments() {
     let (_env, client, actors) = setup();
@@ -8985,6 +8984,56 @@ fn test_sc560_config_update_count_increments() {
         &actors.admin,
         &symbol_short!("high"),
         &29u32,
+=======
+// SC — Config update guards (#556 idempotency, #557 validate_config,
+// #558 cross-severity monotonicity, #559 admin authorization)
+// ============================================================
+
+#[test]
+fn test_sc556_identical_config_update_is_idempotent_noop() {
+    let (env, client, actors) = setup();
+    let before = env.events().all().len();
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("critical"),
+        &15u32,
+        &100i128,
+        &750i128,
+        &200u32,
+        &150u32,
+        &100u32,
+    );
+    let after = env.events().all().len();
+    assert_eq!(
+        before, after,
+        "idempotent re-set must not emit an update event"
+    );
+}
+
+#[test]
+fn test_sc556_changed_config_update_emits_event() {
+    let (env, client, actors) = setup();
+    let before = env.events().all().len();
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("critical"),
+        &14u32,
+        &100i128,
+        &750i128,
+        &200u32,
+        &150u32,
+        &100u32,
+    );
+    assert!(env.events().all().len() > before);
+}
+
+#[test]
+fn test_sc558_monotonic_update_is_accepted() {
+    let (_env, client, actors) = setup();
+    client.set_config(
+        &actors.admin,
+        &symbol_short!("high"),
+        &25u32,
         &50i128,
         &750i128,
         &200u32,
@@ -9005,6 +9054,9 @@ fn test_sc561_export_import_config_map_round_trip() {
             .get_config(&symbol_short!("critical"))
             .threshold_minutes,
         15
+    assert_eq!(
+        client.get_config(&symbol_short!("high")).threshold_minutes,
+        25
     );
 }
 
@@ -9021,6 +9073,18 @@ fn test_sc561_import_config_map_requires_admin() {
     let (_env, client, actors) = setup();
     let exported = client.export_config_map();
     let res = client.try_import_config_map(&actors.stranger, &exported);
+fn test_sc558_cross_severity_inversion_rejected() {
+    let (_env, client, actors) = setup();
+    let res = client.try_set_config(
+        &actors.admin,
+        &symbol_short!("high"),
+        &10u32,
+        &60i128,
+        &750i128,
+        &200u32,
+        &150u32,
+        &100u32,
+    );
     assert!(res.is_err());
 }
 
@@ -9033,6 +9097,23 @@ fn test_sc562_threshold_to_seconds_multiplies_by_sixty() {
 
 #[test]
 fn test_sc563_require_admin_rejects_non_admin_set_config() {
+fn test_sc557_validate_config_rejects_out_of_range_threshold() {
+    let (_env, client, actors) = setup();
+    let res = client.try_set_config(
+        &actors.admin,
+        &symbol_short!("critical"),
+        &0u32,
+        &100i128,
+        &750i128,
+        &200u32,
+        &150u32,
+        &100u32,
+    );
+    assert!(res.is_err());
+}
+
+#[test]
+fn test_sc559_set_config_requires_admin() {
     let (_env, client, actors) = setup();
     assert_eq!(
         client.try_set_config(
