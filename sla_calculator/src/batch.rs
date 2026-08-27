@@ -299,3 +299,14 @@ pub fn find_result_by_outage_id(
     }
     None
 }
+
+#533 Batch: Change Option to soroban_sdk::Vec in BatchResult for Soroban ScVal XDR compatibility
+Repo Avatar
+OpSoll/noc-iq-contracts
+Description
+#[contracttype] structs containing Option fail Soroban SDK macro expansion due to missing ScVal conversion traits. Using soroban_sdk::Vec (empty vec = None, 1-element vec = Some) provides clean XDR serialization.
+
+Acceptance Criteria
+ Update pub result: soroban_sdk::Vec in sla_calculator/src/batch.rs.
+ Construct Vec::new(&env) for empty results and single-element vec for valid results.
+ Verify cargo test compiles and passes cleanly.
