@@ -272,14 +272,24 @@ pub fn validate_batch(
         return Err(SLAError::ThresholdOutOfBounds);
     }
 
-    // Check for duplicate outage IDs
+    // Check for duplicate outage IDs and validate severity symbols (#542)
     let mut seen = soroban_sdk::Map::new(env);
+    let valid_severities = [
+        symbol_short!("critical"),
+        symbol_short!("high"),
+        symbol_short!("medium"),
+        symbol_short!("low"),
+    ];
     for i in 0..requests.len() {
         let req = requests.get(i).unwrap();
         if seen.get(req.outage_id.clone()).unwrap_or(false) {
             return Err(SLAError::DuplicateOutageInput);
         }
-        seen.set(req.outage_id, true);
+        seen.set(req.outage_id.clone(), true);
+
+        if !valid_severities.contains(&req.severity) {
+            return Err(SLAError::InvalidSeverity);
+        }
     }
 
     Ok(requests.len())
@@ -299,14 +309,3 @@ pub fn find_result_by_outage_id(
     }
     None
 }
-
-#533 Batch: Change Option to soroban_sdk::Vec in BatchResult for Soroban ScVal XDR compatibility
-Repo Avatar
-OpSoll/noc-iq-contracts
-Description
-#[contracttype] structs containing Option fail Soroban SDK macro expansion due to missing ScVal conversion traits. Using soroban_sdk::Vec (empty vec = None, 1-element vec = Some) provides clean XDR serialization.
-
-Acceptance Criteria
- Update pub result: soroban_sdk::Vec in sla_calculator/src/batch.rs.
- Construct Vec::new(&env) for empty results and single-element vec for valid results.
- Verify cargo test compiles and passes cleanly.
