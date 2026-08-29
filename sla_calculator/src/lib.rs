@@ -190,6 +190,8 @@ pub struct SLAConfigEntry {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SLAConfigSnapshot {
     pub version: Symbol,
+    /// Deterministic hash of all severity configs (same algorithm as get_config_version_hash).
+    pub version_hash: u64,
     pub entries: Vec<SLAConfigEntry>,
 }
 
@@ -383,51 +385,7 @@ impl SLACalculatorContract {
             .instance()
             .set(&INIT_TIME_KEY, &env.ledger().timestamp());
 
-        let mut configs = Map::<Symbol, SLAConfig>::new(&env);
-        configs.set(
-            symbol_short!("critical"),
-            SLAConfig {
-                threshold_minutes: 15,
-                penalty_per_minute: 100,
-                reward_base: 750,
-                top_tier_multiplier: 200,
-                excel_tier_multiplier: 150,
-                good_tier_multiplier: 100,
-            },
-        );
-        configs.set(
-            symbol_short!("high"),
-            SLAConfig {
-                threshold_minutes: 30,
-                penalty_per_minute: 50,
-                reward_base: 750,
-                top_tier_multiplier: 200,
-                excel_tier_multiplier: 150,
-                good_tier_multiplier: 100,
-            },
-        );
-        configs.set(
-            symbol_short!("medium"),
-            SLAConfig {
-                threshold_minutes: 60,
-                penalty_per_minute: 25,
-                reward_base: 750,
-                top_tier_multiplier: 200,
-                excel_tier_multiplier: 150,
-                good_tier_multiplier: 100,
-            },
-        );
-        configs.set(
-            symbol_short!("low"),
-            SLAConfig {
-                threshold_minutes: 120,
-                penalty_per_minute: 10,
-                reward_base: 600,
-                top_tier_multiplier: 200,
-                excel_tier_multiplier: 150,
-                good_tier_multiplier: 100,
-            },
-        );
+        let configs = Self::initialize_default_configs(&env);
 
         env.storage().instance().set(&CONFIG_KEY, &configs);
         Self::write_version(&env);
@@ -997,8 +955,16 @@ impl SLACalculatorContract {
             entries.push_back(SLAConfigEntry { severity, config });
         }
 
+        let configs: Map<Symbol, SLAConfig> = env
+            .storage()
+            .instance()
+            .get(&CONFIG_KEY)
+            .ok_or(SLAError::NotInitialized)?;
+        let version_hash = Self::compute_config_version_hash(&env, &configs)?;
+
         Ok(SLAConfigSnapshot {
             version: symbol_short!("v1"),
+            version_hash,
             entries,
         })
     }
@@ -1007,51 +973,7 @@ impl SLACalculatorContract {
         Self::check_version(&env)?;
         Self::require_admin(&env, &caller)?;
 
-        let mut configs = Map::<Symbol, SLAConfig>::new(&env);
-        configs.set(
-            symbol_short!("critical"),
-            SLAConfig {
-                threshold_minutes: 15,
-                penalty_per_minute: 100,
-                reward_base: 750,
-                top_tier_multiplier: 200,
-                excel_tier_multiplier: 150,
-                good_tier_multiplier: 100,
-            },
-        );
-        configs.set(
-            symbol_short!("high"),
-            SLAConfig {
-                threshold_minutes: 30,
-                penalty_per_minute: 50,
-                reward_base: 750,
-                top_tier_multiplier: 200,
-                excel_tier_multiplier: 150,
-                good_tier_multiplier: 100,
-            },
-        );
-        configs.set(
-            symbol_short!("medium"),
-            SLAConfig {
-                threshold_minutes: 60,
-                penalty_per_minute: 25,
-                reward_base: 750,
-                top_tier_multiplier: 200,
-                excel_tier_multiplier: 150,
-                good_tier_multiplier: 100,
-            },
-        );
-        configs.set(
-            symbol_short!("low"),
-            SLAConfig {
-                threshold_minutes: 120,
-                penalty_per_minute: 10,
-                reward_base: 600,
-                top_tier_multiplier: 200,
-                excel_tier_multiplier: 150,
-                good_tier_multiplier: 100,
-            },
-        );
+        let configs = Self::initialize_default_configs(&env);
 
         env.storage().instance().set(&CONFIG_KEY, &configs);
         Ok(())
@@ -1221,8 +1143,8 @@ impl SLACalculatorContract {
     pub fn simulate_sla(env: Env, outage: OutageInput) -> Result<SlaSimulationResult, SLAError> {
         Self::check_version(&env)?;
         // Validate inputs just like in production calculations
-        Self::validate_symbol_input(&outage.outage_id, true)?;
-        Self::validate_symbol_input(&outage.severity, false)?;
+        Self::validate_symbol_input(&env, &outage.outage_id, true)?;
+        Self::validate_symbol_input(&env, &outage.severity, false)?;
         // We bypass pause and operator checks to allow public simulation
         let cfg = Self::load_config(&env, &outage.severity)?;
         // Delegate to pure core calculation logic - no storage writes, no events emitted
@@ -1237,8 +1159,8 @@ impl SLACalculatorContract {
     ) -> Result<SLAResult, SLAError> {
         Self::check_version(&env)?;
         // Graceful degradation: validate inputs before processing
-        Self::validate_symbol_input(&outage_id, true)?;
-        Self::validate_symbol_input(&severity, false)?;
+        Self::validate_symbol_input(&env, &outage_id, true)?;
+        Self::validate_symbol_input(&env, &severity, false)?;
         // We bypass pause and operator checks to allow continuous, public verification
         let configs: Map<Symbol, SLAConfig> = env
             .storage()
@@ -1456,8 +1378,8 @@ impl SLACalculatorContract {
     ) -> Result<SLAResult, SLAError> {
         Self::check_version(&env)?;
         // Graceful degradation: validate inputs before processing
-        Self::validate_symbol_input(&outage_id, true)?;
-        Self::validate_symbol_input(&severity, false)?;
+        Self::validate_symbol_input(&env, &outage_id, true)?;
+        Self::validate_symbol_input(&env, &severity, false)?;
         Self::require_not_paused(&env)?; // #27
         Self::require_operator(&env, &caller)?; // #28
 
@@ -1694,12 +1616,84 @@ impl SLACalculatorContract {
         Ok(())
     }
 
-    /// Validates that a Symbol is not empty, within 32 character length limit,
-    /// and contains only valid characters (a-zA-Z0-9_). Returns `InvalidOutageId`
-    /// for outage IDs or `MalformedSymbolInput` for other symbols when validation
-    /// fails, allowing graceful degradation instead of panicking.
-    fn validate_symbol_input(_symbol: &Symbol, _is_outage_id: bool) -> Result<(), SLAError> {
-        // Soroban Symbol is natively restricted to valid characters and max length 32.
+    /// Validates symbol inputs used in outage / severity fields.
+    ///
+    /// - `_env` is accepted for API consistency with other validation helpers
+    ///   (and future Env-backed checks).
+    /// - When `is_outage_id` is false the symbol must match a canonical severity
+    ///   (`critical`, `high`, `medium`, `low`); otherwise `InvalidSeverity` is returned.
+    /// - Outage IDs rely on Soroban's native Symbol constraints (non-empty, ≤32, charset).
+
+    /// #551 – Populate sensible default SLA configurations for all severity tiers.
+    ///
+    /// Defaults:
+    /// - critical: threshold=15m, penalty=100, reward=750
+    /// - high:     threshold=30m, penalty=50,  reward=500
+    /// - medium:   threshold=60m, penalty=20,  reward=250
+    /// - low:      threshold=120m, penalty=5,   reward=100
+    fn initialize_default_configs(env: &Env) -> Map<Symbol, SLAConfig> {
+        let mut configs = Map::<Symbol, SLAConfig>::new(env);
+        configs.set(
+            symbol_short!("critical"),
+            SLAConfig {
+                threshold_minutes: 15,
+                penalty_per_minute: 100,
+                reward_base: 750,
+                top_tier_multiplier: 200,
+                excel_tier_multiplier: 150,
+                good_tier_multiplier: 100,
+            },
+        );
+        configs.set(
+            symbol_short!("high"),
+            SLAConfig {
+                threshold_minutes: 30,
+                penalty_per_minute: 50,
+                reward_base: 500,
+                top_tier_multiplier: 200,
+                excel_tier_multiplier: 150,
+                good_tier_multiplier: 100,
+            },
+        );
+        configs.set(
+            symbol_short!("medium"),
+            SLAConfig {
+                threshold_minutes: 60,
+                penalty_per_minute: 20,
+                reward_base: 250,
+                top_tier_multiplier: 200,
+                excel_tier_multiplier: 150,
+                good_tier_multiplier: 100,
+            },
+        );
+        configs.set(
+            symbol_short!("low"),
+            SLAConfig {
+                threshold_minutes: 120,
+                penalty_per_minute: 5,
+                reward_base: 100,
+                top_tier_multiplier: 200,
+                excel_tier_multiplier: 150,
+                good_tier_multiplier: 100,
+            },
+        );
+        configs
+    }
+
+    fn validate_symbol_input(
+        _env: &Env,
+        symbol: &Symbol,
+        is_outage_id: bool,
+    ) -> Result<(), SLAError> {
+        if is_outage_id {
+            // Soroban Symbol is natively restricted to valid characters and max length 32.
+            return Ok(());
+        }
+
+        // Severity path: must match canonical severity tiers.
+        if !Self::is_canonical_severity(symbol) {
+            return Err(SLAError::InvalidSeverity);
+        }
         Ok(())
     }
 

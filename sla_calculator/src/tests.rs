@@ -8950,9 +8950,9 @@ proptest! {
         let (env, _client, _actors) = setup();
         let cfg = match severity_idx {
             0 => SLAConfig { threshold_minutes: 15, penalty_per_minute: 100, reward_base: 750, top_tier_multiplier: 200, excel_tier_multiplier: 150, good_tier_multiplier: 100 },
-            1 => SLAConfig { threshold_minutes: 30, penalty_per_minute: 50, reward_base: 750, top_tier_multiplier: 200, excel_tier_multiplier: 150, good_tier_multiplier: 100 },
-            2 => SLAConfig { threshold_minutes: 60, penalty_per_minute: 25, reward_base: 750, top_tier_multiplier: 200, excel_tier_multiplier: 150, good_tier_multiplier: 100 },
-            _ => SLAConfig { threshold_minutes: 120, penalty_per_minute: 10, reward_base: 600, top_tier_multiplier: 200, excel_tier_multiplier: 150, good_tier_multiplier: 100 },
+            1 => SLAConfig { threshold_minutes: 30, penalty_per_minute: 50, reward_base: 500, top_tier_multiplier: 200, excel_tier_multiplier: 150, good_tier_multiplier: 100 },
+            2 => SLAConfig { threshold_minutes: 60, penalty_per_minute: 20, reward_base: 250, top_tier_multiplier: 200, excel_tier_multiplier: 150, good_tier_multiplier: 100 },
+            _ => SLAConfig { threshold_minutes: 120, penalty_per_minute: 5, reward_base: 100, top_tier_multiplier: 200, excel_tier_multiplier: 150, good_tier_multiplier: 100 },
         };
         let hash = 12345u64;
 
@@ -9691,4 +9691,125 @@ fn test_config_updated_event_emitted_on_set_config() {
     // payload: (threshold_minutes, penalty_per_minute, reward_base)
     let payload: (u32, i128, i128) = data.try_into_val(&env).unwrap();
     assert_eq!(payload, (45u32, 75i128, 400i128));
+}
+
+
+// ============================================================
+// #539 – Batch calculation CPU instruction budget (50 items)
+// ============================================================
+
+#[test]
+fn test_batch_calculate_50_item_cpu_budget() {
+    let (env, client, actors) = setup();
+
+    // Build a max-size batch (50 items).
+    let mut requests = Vec::<BatchRequest>::new(&env);
+    for i in 0..50 {
+        requests.push_back(BatchRequest {
+            outage_id: symbol(&env, &format!("OUTAGE_{}", i)),
+            severity: symbol_short!("high"),
+            mttr_minutes: 10 + (i % 40),
+        });
+    }
+
+    env.budget().reset_tracker();
+
+    let (summary, results) = client.batch_calculate(&actors.operator, &requests);
+    assert_eq!(summary.total, 50);
+    assert_eq!(results.len(), 50);
+
+    let cpu = env.budget().cpu_instruction_cost();
+    assert!(
+        cpu < 5_000_000,
+        "50-item batch calculation consumed {} CPU instructions, expected < 5,000,000",
+        cpu
+    );
+}
+
+// ============================================================
+// #550 – get_config_snapshot unit test (entries + version hash)
+// ============================================================
+
+#[test]
+fn test_get_config_snapshot_returns_entries_and_version_hash() {
+    let (_env, client, _actors) = setup();
+
+    let snapshot = client.get_config_snapshot();
+    assert_eq!(snapshot.entries.len(), 4);
+    assert_eq!(snapshot.version, symbol_short!("v1"));
+
+    // version_hash must match standalone hash getter
+    let standalone = client.get_config_version_hash();
+    assert_eq!(snapshot.version_hash, standalone);
+
+    // Canonical order and #551 default values
+    let critical = snapshot.entries.get(0).unwrap();
+    assert_eq!(critical.severity, symbol_short!("critical"));
+    assert_eq!(critical.config.threshold_minutes, 15);
+    assert_eq!(critical.config.penalty_per_minute, 100);
+    assert_eq!(critical.config.reward_base, 750);
+
+    let high = snapshot.entries.get(1).unwrap();
+    assert_eq!(high.severity, symbol_short!("high"));
+    assert_eq!(high.config.threshold_minutes, 30);
+    assert_eq!(high.config.penalty_per_minute, 50);
+    assert_eq!(high.config.reward_base, 500);
+
+    let medium = snapshot.entries.get(2).unwrap();
+    assert_eq!(medium.severity, symbol_short!("medium"));
+    assert_eq!(medium.config.threshold_minutes, 60);
+    assert_eq!(medium.config.penalty_per_minute, 20);
+    assert_eq!(medium.config.reward_base, 250);
+
+    let low = snapshot.entries.get(3).unwrap();
+    assert_eq!(low.severity, symbol_short!("low"));
+    assert_eq!(low.config.threshold_minutes, 120);
+    assert_eq!(low.config.penalty_per_minute, 5);
+    assert_eq!(low.config.reward_base, 100);
+}
+
+// ============================================================
+// #551 – Default SLA configuration values after initialize
+// ============================================================
+
+#[test]
+fn test_initialize_default_configs_values() {
+    let (_env, client, _actors) = setup();
+
+    let critical = client.get_config(&symbol_short!("critical"));
+    assert_eq!(critical.threshold_minutes, 15);
+    assert_eq!(critical.penalty_per_minute, 100);
+    assert_eq!(critical.reward_base, 750);
+
+    let high = client.get_config(&symbol_short!("high"));
+    assert_eq!(high.threshold_minutes, 30);
+    assert_eq!(high.penalty_per_minute, 50);
+    assert_eq!(high.reward_base, 500);
+
+    let medium = client.get_config(&symbol_short!("medium"));
+    assert_eq!(medium.threshold_minutes, 60);
+    assert_eq!(medium.penalty_per_minute, 20);
+    assert_eq!(medium.reward_base, 250);
+
+    let low = client.get_config(&symbol_short!("low"));
+    assert_eq!(low.threshold_minutes, 120);
+    assert_eq!(low.penalty_per_minute, 5);
+    assert_eq!(low.reward_base, 100);
+}
+
+// ============================================================
+// #542 – validate_symbol_input rejects non-canonical severity
+// ============================================================
+
+#[test]
+fn test_invalid_severity_symbol_rejected_on_calculate() {
+    let (_env, client, actors) = setup();
+
+    let result = client.try_calculate_sla(
+        &actors.operator,
+        &symbol_short!("out1"),
+        &symbol_short!("extreme"), // not canonical
+        &10,
+    );
+    assert!(result.is_err());
 }
