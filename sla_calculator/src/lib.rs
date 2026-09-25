@@ -39,6 +39,10 @@ const RESULT_SCHEMA_VERSION: u32 = 1;
 const MAX_HISTORY_SIZE: u32 = 1000; // SC-062: bounded retention cap
 const RETENTION_LIMIT_KEY: Symbol = symbol_short!("RETLIM"); // SC-013: configurable retention
 const PROPOSAL_EXPIRATION_SECONDS: u64 = 604800; // 7 days in seconds
+const MIGRATION_KEY: Symbol = symbol_short!("MIGKEY"); // #577
+const MIGRATION_TIME_KEY: Symbol = symbol_short!("MIGTIME"); // #577
+const MIGRATION_TIMELock: u64 = 1_209_600; // 14 days in seconds
+const CONFIG_UPD_COUNT_KEY: Symbol = symbol_short!("CFGUPDCT"); // #560: total config updates
 
 // -----------------------------------------------------------------------
 // Events
@@ -89,6 +93,10 @@ const EVENT_OP_CAN: Symbol = symbol_short!("op_can"); // SC-024
 const EVENT_OP_REV: Symbol = symbol_short!("op_rev"); // #472
 const EVENT_SLA_VIOLATED: Symbol = symbol_short!("sla_viol"); // #594
 const EVENT_SLA_MET: Symbol = symbol_short!("sla_met"); // #595
+const EVENT_ROLE_AUDIT: Symbol = symbol_short!("role_aud"); // #576
+const EVENT_MIGRATION_SET: Symbol = symbol_short!("migr_set"); // #577
+const EVENT_MIGRATION_ACT: Symbol = symbol_short!("migr_act"); // #577
+const EVENT_HISTORY_PRUNED_Q: Symbol = symbol_short!("hist_pq"); // #578
 const EVENT_VERSION: Symbol = symbol_short!("v1");
 
 // -----------------------------------------------------------------------
@@ -167,7 +175,7 @@ pub struct SLAResult {
     pub amount: i128,             // negative = penalty, positive = reward
     pub payment_type: Symbol,     // "rew" | "pen"
     pub rating: Symbol,           // "top" | "excel" | "good" | "poor"
-    pub config_version_hash: u64, // deterministic binding to config used for evaluation
+    pub config_version_hash: soroban_sdk::BytesN<32>, // deterministic binding to config used for evaluation
     pub recorded_at: u64,         // SC-063: ledger timestamp at calculation time
 }
 
@@ -182,6 +190,8 @@ pub struct SLAConfigEntry {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SLAConfigSnapshot {
     pub version: Symbol,
+    /// Deterministic hash of all severity configs (same algorithm as get_config_version_hash).
+    pub version_hash: u64,
     pub entries: Vec<SLAConfigEntry>,
 }
 
@@ -328,6 +338,15 @@ pub struct HistorySummary {
     pub violated: u32,
 }
 
+use soroban_sdk::xdr::ToXdr;
+
+pub fn compute_config_version_hash(
+    env: &Env,
+    configs: &soroban_sdk::Map<Symbol, SLAConfig>,
+) -> soroban_sdk::BytesN<32> {
+    env.crypto().sha256(&configs.to_xdr(env))
+}
+
 // -----------------------------------------------------------------------
 // Contract implementation
 // -----------------------------------------------------------------------
@@ -366,51 +385,7 @@ impl SLACalculatorContract {
             .instance()
             .set(&INIT_TIME_KEY, &env.ledger().timestamp());
 
-        let mut configs = Map::<Symbol, SLAConfig>::new(&env);
-        configs.set(
-            symbol_short!("critical"),
-            SLAConfig {
-                threshold_minutes: 15,
-                penalty_per_minute: 100,
-                reward_base: 750,
-                top_tier_multiplier: 200,
-                excel_tier_multiplier: 150,
-                good_tier_multiplier: 100,
-            },
-        );
-        configs.set(
-            symbol_short!("high"),
-            SLAConfig {
-                threshold_minutes: 30,
-                penalty_per_minute: 50,
-                reward_base: 750,
-                top_tier_multiplier: 200,
-                excel_tier_multiplier: 150,
-                good_tier_multiplier: 100,
-            },
-        );
-        configs.set(
-            symbol_short!("medium"),
-            SLAConfig {
-                threshold_minutes: 60,
-                penalty_per_minute: 25,
-                reward_base: 750,
-                top_tier_multiplier: 200,
-                excel_tier_multiplier: 150,
-                good_tier_multiplier: 100,
-            },
-        );
-        configs.set(
-            symbol_short!("low"),
-            SLAConfig {
-                threshold_minutes: 120,
-                penalty_per_minute: 10,
-                reward_base: 600,
-                top_tier_multiplier: 200,
-                excel_tier_multiplier: 150,
-                good_tier_multiplier: 100,
-            },
-        );
+        let configs = Self::initialize_default_configs(&env);
 
         env.storage().instance().set(&CONFIG_KEY, &configs);
         Self::write_version(&env);
@@ -505,21 +480,45 @@ impl SLACalculatorContract {
             .ok_or(SLAError::NotInitialized)
     }
 
+    /// #569 – Soroban address authorization check.
+    ///
+    /// Enforces that `caller` actually authorized this invocation via
+    /// `require_auth()` (not merely that the passed address string matches),
+    /// then verifies the caller holds the admin role. Returns `Unauthorized`
+    /// for any non-admin caller. This is the on-chain authorization primitive
+    /// admin-gated entry points should build on.
+    pub fn verify_admin_auth(env: Env, caller: Address) -> Result<(), SLAError> {
+        caller.require_auth();
+        Self::check_version(&env)?;
+        Self::require_admin(&env, &caller)?;
+        Ok(())
+    }
+
     // -------------------------------------------------------------------
     // #28 – Operator management (admin only)
     // -------------------------------------------------------------------
 
     /// Replace the operator address (admin only).
-    /// Emits an `op_set` event.
+    /// Emits an `op_set` event and a `role_aud` audit trail event (#576).
     pub fn set_operator(env: Env, caller: Address, new_operator: Address) -> Result<(), SLAError> {
         Self::check_version(&env)?;
         Self::require_admin(&env, &caller)?;
 
+        let prev_operator: Option<Address> = env.storage().instance().get(&OPERATOR_KEY);
         env.storage().instance().set(&OPERATOR_KEY, &new_operator);
 
         env.events().publish(
-            (EVENT_OP_SET, EVENT_VERSION, caller),
+            (EVENT_OP_SET, EVENT_VERSION, caller.clone()),
             (new_operator.clone(),),
+        );
+
+        // #576 – Role audit trail event
+        Self::publish_role_audit_event(
+            &env,
+            &caller,
+            symbol_short!("operator"),
+            prev_operator.as_ref(),
+            Some(&new_operator),
         );
 
         Ok(())
@@ -604,10 +603,21 @@ impl SLACalculatorContract {
         if caller != pending.target {
             return Err(SLAError::Unauthorized);
         }
+        let prev_admin: Option<Address> = env.storage().instance().get(&ADMIN_KEY);
         env.storage().instance().set(&ADMIN_KEY, &caller);
         env.storage().instance().remove(&PENDING_ADMIN_KEY);
         env.events()
-            .publish((EVENT_ADMIN_ACC, EVENT_VERSION, caller), ());
+            .publish((EVENT_ADMIN_ACC, EVENT_VERSION, caller.clone()), ());
+
+        // #576 – Role audit trail event
+        Self::publish_role_audit_event(
+            &env,
+            &caller,
+            symbol_short!("admin"),
+            prev_admin.as_ref(),
+            Some(&caller),
+        );
+
         Ok(())
     }
 
@@ -701,10 +711,21 @@ impl SLACalculatorContract {
         if caller != pending.target {
             return Err(SLAError::Unauthorized);
         }
+        let prev_operator: Option<Address> = env.storage().instance().get(&OPERATOR_KEY);
         env.storage().instance().set(&OPERATOR_KEY, &caller);
         env.storage().instance().remove(&PENDING_OP_KEY);
         env.events()
-            .publish((EVENT_OP_ACC, EVENT_VERSION, caller), ());
+            .publish((EVENT_OP_ACC, EVENT_VERSION, caller.clone()), ());
+
+        // #576 – Role audit trail event
+        Self::publish_role_audit_event(
+            &env,
+            &caller,
+            symbol_short!("operator"),
+            prev_operator.as_ref(),
+            Some(&caller),
+        );
+
         Ok(())
     }
 
@@ -823,23 +844,90 @@ impl SLACalculatorContract {
             &configs,
         )?;
 
-        configs.set(
-            severity.clone(),
-            SLAConfig {
-                threshold_minutes,
-                penalty_per_minute,
-                reward_base,
-                top_tier_multiplier,
-                excel_tier_multiplier,
-                good_tier_multiplier,
-            },
-        );
+        let new_config = SLAConfig {
+            threshold_minutes,
+            penalty_per_minute,
+            reward_base,
+            top_tier_multiplier,
+            excel_tier_multiplier,
+            good_tier_multiplier,
+        };
+
+        // #556 – idempotency: a re-submission of the identical configuration for
+        // this severity is a no-op (no storage write, no event emitted).
+        if let Some(existing) = configs.get(severity.clone()) {
+            if existing == new_config {
+                return Ok(());
+            }
+        }
+
+        configs.set(severity.clone(), new_config);
         env.storage().instance().set(&CONFIG_KEY, &configs);
+
+        // #560 – track total successful configuration updates.
+        let updates: u32 = env
+            .storage()
+            .instance()
+            .get(&CONFIG_UPD_COUNT_KEY)
+            .unwrap_or(0);
+        env.storage()
+            .instance()
+            .set(&CONFIG_UPD_COUNT_KEY, &(updates + 1));
 
         env.events().publish(
             (EVENT_CONFIG_UPD, EVENT_VERSION, severity),
             (threshold_minutes, penalty_per_minute, reward_base),
         );
+        Ok(())
+    }
+
+    /// #560 – Total number of successful `set_config` updates over the contract
+    /// lifetime.
+    pub fn get_config_update_count(env: Env) -> Result<u32, SLAError> {
+        Self::check_version(&env)?;
+        Ok(env
+            .storage()
+            .instance()
+            .get(&CONFIG_UPD_COUNT_KEY)
+            .unwrap_or(0))
+    }
+
+    /// #562 – Convert a configuration threshold expressed in minutes to ledger
+    /// seconds.
+    pub fn threshold_to_seconds(threshold_minutes: u32) -> u64 {
+        (threshold_minutes as u64) * 60
+    }
+
+    /// #561 – Export the complete configuration map for contract upgrades.
+    pub fn export_config_map(env: Env) -> Result<Map<Symbol, SLAConfig>, SLAError> {
+        Self::check_version(&env)?;
+        env.storage()
+            .instance()
+            .get(&CONFIG_KEY)
+            .ok_or(SLAError::NotInitialized)
+    }
+
+    /// #561 – Import a complete configuration map (admin only) during an upgrade.
+    ///
+    /// Validates integrity before persisting: the map must be non-empty and every
+    /// severity key must be canonical, otherwise the import is rejected and the
+    /// existing configuration is left untouched.
+    pub fn import_config_map(
+        env: Env,
+        caller: Address,
+        configs: Map<Symbol, SLAConfig>,
+    ) -> Result<(), SLAError> {
+        Self::check_version(&env)?;
+        Self::require_admin(&env, &caller)?;
+        if configs.is_empty() {
+            return Err(SLAError::ConfigNotFound);
+        }
+        for (severity, _config) in configs.iter() {
+            if !Self::is_canonical_severity(&severity) {
+                return Err(SLAError::InvalidSeverity);
+            }
+        }
+        env.storage().instance().set(&CONFIG_KEY, &configs);
         Ok(())
     }
 
@@ -867,8 +955,16 @@ impl SLACalculatorContract {
             entries.push_back(SLAConfigEntry { severity, config });
         }
 
+        let configs: Map<Symbol, SLAConfig> = env
+            .storage()
+            .instance()
+            .get(&CONFIG_KEY)
+            .ok_or(SLAError::NotInitialized)?;
+        let version_hash = Self::compute_config_version_hash(&env, &configs)?;
+
         Ok(SLAConfigSnapshot {
             version: symbol_short!("v1"),
+            version_hash,
             entries,
         })
     }
@@ -877,51 +973,7 @@ impl SLACalculatorContract {
         Self::check_version(&env)?;
         Self::require_admin(&env, &caller)?;
 
-        let mut configs = Map::<Symbol, SLAConfig>::new(&env);
-        configs.set(
-            symbol_short!("critical"),
-            SLAConfig {
-                threshold_minutes: 15,
-                penalty_per_minute: 100,
-                reward_base: 750,
-                top_tier_multiplier: 200,
-                excel_tier_multiplier: 150,
-                good_tier_multiplier: 100,
-            },
-        );
-        configs.set(
-            symbol_short!("high"),
-            SLAConfig {
-                threshold_minutes: 30,
-                penalty_per_minute: 50,
-                reward_base: 750,
-                top_tier_multiplier: 200,
-                excel_tier_multiplier: 150,
-                good_tier_multiplier: 100,
-            },
-        );
-        configs.set(
-            symbol_short!("medium"),
-            SLAConfig {
-                threshold_minutes: 60,
-                penalty_per_minute: 25,
-                reward_base: 750,
-                top_tier_multiplier: 200,
-                excel_tier_multiplier: 150,
-                good_tier_multiplier: 100,
-            },
-        );
-        configs.set(
-            symbol_short!("low"),
-            SLAConfig {
-                threshold_minutes: 120,
-                penalty_per_minute: 10,
-                reward_base: 600,
-                top_tier_multiplier: 200,
-                excel_tier_multiplier: 150,
-                good_tier_multiplier: 100,
-            },
-        );
+        let configs = Self::initialize_default_configs(&env);
 
         env.storage().instance().set(&CONFIG_KEY, &configs);
         Ok(())
@@ -1091,8 +1143,8 @@ impl SLACalculatorContract {
     pub fn simulate_sla(env: Env, outage: OutageInput) -> Result<SlaSimulationResult, SLAError> {
         Self::check_version(&env)?;
         // Validate inputs just like in production calculations
-        Self::validate_symbol_input(&outage.outage_id, true)?;
-        Self::validate_symbol_input(&outage.severity, false)?;
+        Self::validate_symbol_input(&env, &outage.outage_id, true)?;
+        Self::validate_symbol_input(&env, &outage.severity, false)?;
         // We bypass pause and operator checks to allow public simulation
         let cfg = Self::load_config(&env, &outage.severity)?;
         // Delegate to pure core calculation logic - no storage writes, no events emitted
@@ -1107,8 +1159,8 @@ impl SLACalculatorContract {
     ) -> Result<SLAResult, SLAError> {
         Self::check_version(&env)?;
         // Graceful degradation: validate inputs before processing
-        Self::validate_symbol_input(&outage_id, true)?;
-        Self::validate_symbol_input(&severity, false)?;
+        Self::validate_symbol_input(&env, &outage_id, true)?;
+        Self::validate_symbol_input(&env, &severity, false)?;
         // We bypass pause and operator checks to allow continuous, public verification
         let configs: Map<Symbol, SLAConfig> = env
             .storage()
@@ -1326,8 +1378,8 @@ impl SLACalculatorContract {
     ) -> Result<SLAResult, SLAError> {
         Self::check_version(&env)?;
         // Graceful degradation: validate inputs before processing
-        Self::validate_symbol_input(&outage_id, true)?;
-        Self::validate_symbol_input(&severity, false)?;
+        Self::validate_symbol_input(&env, &outage_id, true)?;
+        Self::validate_symbol_input(&env, &severity, false)?;
         Self::require_not_paused(&env)?; // #27
         Self::require_operator(&env, &caller)?; // #28
 
@@ -1564,12 +1616,84 @@ impl SLACalculatorContract {
         Ok(())
     }
 
-    /// Validates that a Symbol is not empty, within 32 character length limit,
-    /// and contains only valid characters (a-zA-Z0-9_). Returns `InvalidOutageId`
-    /// for outage IDs or `MalformedSymbolInput` for other symbols when validation
-    /// fails, allowing graceful degradation instead of panicking.
-    fn validate_symbol_input(_symbol: &Symbol, _is_outage_id: bool) -> Result<(), SLAError> {
-        // Soroban Symbol is natively restricted to valid characters and max length 32.
+    /// Validates symbol inputs used in outage / severity fields.
+    ///
+    /// - `_env` is accepted for API consistency with other validation helpers
+    ///   (and future Env-backed checks).
+    /// - When `is_outage_id` is false the symbol must match a canonical severity
+    ///   (`critical`, `high`, `medium`, `low`); otherwise `InvalidSeverity` is returned.
+    /// - Outage IDs rely on Soroban's native Symbol constraints (non-empty, ≤32, charset).
+
+    /// #551 – Populate sensible default SLA configurations for all severity tiers.
+    ///
+    /// Defaults:
+    /// - critical: threshold=15m, penalty=100, reward=750
+    /// - high:     threshold=30m, penalty=50,  reward=500
+    /// - medium:   threshold=60m, penalty=20,  reward=250
+    /// - low:      threshold=120m, penalty=5,   reward=100
+    fn initialize_default_configs(env: &Env) -> Map<Symbol, SLAConfig> {
+        let mut configs = Map::<Symbol, SLAConfig>::new(env);
+        configs.set(
+            symbol_short!("critical"),
+            SLAConfig {
+                threshold_minutes: 15,
+                penalty_per_minute: 100,
+                reward_base: 750,
+                top_tier_multiplier: 200,
+                excel_tier_multiplier: 150,
+                good_tier_multiplier: 100,
+            },
+        );
+        configs.set(
+            symbol_short!("high"),
+            SLAConfig {
+                threshold_minutes: 30,
+                penalty_per_minute: 50,
+                reward_base: 500,
+                top_tier_multiplier: 200,
+                excel_tier_multiplier: 150,
+                good_tier_multiplier: 100,
+            },
+        );
+        configs.set(
+            symbol_short!("medium"),
+            SLAConfig {
+                threshold_minutes: 60,
+                penalty_per_minute: 20,
+                reward_base: 250,
+                top_tier_multiplier: 200,
+                excel_tier_multiplier: 150,
+                good_tier_multiplier: 100,
+            },
+        );
+        configs.set(
+            symbol_short!("low"),
+            SLAConfig {
+                threshold_minutes: 120,
+                penalty_per_minute: 5,
+                reward_base: 100,
+                top_tier_multiplier: 200,
+                excel_tier_multiplier: 150,
+                good_tier_multiplier: 100,
+            },
+        );
+        configs
+    }
+
+    fn validate_symbol_input(
+        _env: &Env,
+        symbol: &Symbol,
+        is_outage_id: bool,
+    ) -> Result<(), SLAError> {
+        if is_outage_id {
+            // Soroban Symbol is natively restricted to valid characters and max length 32.
+            return Ok(());
+        }
+
+        // Severity path: must match canonical severity tiers.
+        if !Self::is_canonical_severity(symbol) {
+            return Err(SLAError::InvalidSeverity);
+        }
         Ok(())
     }
 
@@ -1879,6 +2003,25 @@ impl SLACalculatorContract {
     }
 
     // -------------------------------------------------------------------
+    // #576 – Role audit trail event logger
+    // -------------------------------------------------------------------
+
+    fn publish_role_audit_event(
+        env: &Env,
+        caller: &Address,
+        role: Symbol,
+        prev_address: Option<&Address>,
+        new_address: Option<&Address>,
+    ) {
+        let prev_present = prev_address.is_some();
+        let new_present = new_address.is_some();
+        env.events().publish(
+            (EVENT_ROLE_AUDIT, EVENT_VERSION, caller.clone()),
+            (role, prev_present, new_present),
+        );
+    }
+
+    // -------------------------------------------------------------------
     // #33 - History & Compaction (Admin only)
     // -------------------------------------------------------------------
 
@@ -2110,13 +2253,13 @@ impl SLACalculatorContract {
     // SC-013 – Configurable retention limit (admin only)
     // -------------------------------------------------------------------
 
-    /// Set the maximum number of history entries to retain.
-    /// Must be between 1 and MAX_HISTORY_SIZE (1000). Admin only.
+    /// Set the maximum number of history entries to retain (#579).
+    /// Must be between 50 and 5,000. Admin only.
     /// The new limit takes effect on the next `calculate_sla` call.
     pub fn set_retention_limit(env: Env, caller: Address, limit: u32) -> Result<(), SLAError> {
         Self::check_version(&env)?;
         Self::require_admin(&env, &caller)?;
-        if limit == 0 || limit > MAX_HISTORY_SIZE {
+        if limit < 50 || limit > 5000 {
             return Err(SLAError::RetentionLimitOutOfRange);
         }
         env.storage().instance().set(&RETENTION_LIMIT_KEY, &limit);
@@ -2180,5 +2323,252 @@ impl SLACalculatorContract {
             is_paused,
             contract_name: symbol_short!("sla_calc"),
         })
+    }
+
+    // -------------------------------------------------------------------
+    // #577 – Emergency contract migration key
+    // -------------------------------------------------------------------
+
+    /// Set an emergency migration key for contract upgrades (#577).
+    /// Enforces a 14-day timelock before the key becomes active.
+    /// Admin only. Emits a `migr_set` event.
+    pub fn set_migration_key(
+        env: Env,
+        caller: Address,
+        migration_address: Address,
+    ) -> Result<(), SLAError> {
+        Self::check_version(&env)?;
+        Self::require_admin(&env, &caller)?;
+
+        let now = env.ledger().timestamp();
+        env.storage().instance().set(&MIGRATION_KEY, &migration_address);
+        env.storage().instance().set(&MIGRATION_TIME_KEY, &now);
+
+        env.events().publish(
+            (EVENT_MIGRATION_SET, EVENT_VERSION, caller),
+            (migration_address,),
+        );
+
+        Ok(())
+    }
+
+    /// Execute emergency migration using the migration key (#577).
+    /// Only callable after the 14-day timelock has elapsed.
+    /// Emits a `migr_act` event on success.
+    pub fn execute_migration(env: Env, caller: Address) -> Result<(), SLAError> {
+        Self::check_version(&env)?;
+
+        let migration_addr: Address = env
+            .storage()
+            .instance()
+            .get(&MIGRATION_KEY)
+            .ok_or(SLAError::NoPendingTransfer)?;
+
+        if caller != migration_addr {
+            return Err(SLAError::Unauthorized);
+        }
+
+        let set_time: u64 = env
+            .storage()
+            .instance()
+            .get(&MIGRATION_TIME_KEY)
+            .ok_or(SLAError::NotInitialized)?;
+
+        let now = env.ledger().timestamp();
+        if now.saturating_sub(set_time) < MIGRATION_TIMELock {
+            return Err(SLAError::ThresholdOutOfBounds);
+        }
+
+        // Bump storage version to trigger migration path
+        let current_version: u32 = env
+            .storage()
+            .instance()
+            .get(&STORAGE_VERSION_KEY)
+            .unwrap_or(0);
+        env.storage()
+            .instance()
+            .set(&STORAGE_VERSION_KEY, &(current_version + 1));
+
+        // Clean up migration state
+        env.storage().instance().remove(&MIGRATION_KEY);
+        env.storage().instance().remove(&MIGRATION_TIME_KEY);
+
+        env.events()
+            .publish((EVENT_MIGRATION_ACT, EVENT_VERSION, caller), ());
+
+        Ok(())
+    }
+
+    // -------------------------------------------------------------------
+    // #578 – History pruning queue
+    // -------------------------------------------------------------------
+
+    /// Automatically prune oldest history entries when count exceeds
+    /// the configured retention limit (#578).
+    /// Emits `hist_pq` event with count of pruned entries.
+    pub fn prune_history_queue(env: Env, caller: Address) -> Result<u32, SLAError> {
+        Self::check_version(&env)?;
+        Self::require_admin(&env, &caller)?;
+
+        let retention_limit: u32 = env
+            .storage()
+            .instance()
+            .get(&RETENTION_LIMIT_KEY)
+            .unwrap_or(MAX_HISTORY_SIZE);
+
+        let history: Vec<SLAResult> = env
+            .storage()
+            .instance()
+            .get(&HISTORY_KEY)
+            .unwrap_or_else(|| Vec::new(&env));
+
+        let len = history.len();
+        if len <= retention_limit {
+            return Ok(0);
+        }
+
+        let remove_count = len - retention_limit;
+        let mut new_history = Vec::new(&env);
+
+        for i in remove_count..len {
+            new_history.push_back(history.get(i).unwrap());
+        }
+
+        env.storage().instance().set(&HISTORY_KEY, &new_history);
+        env.events().publish(
+            (EVENT_HISTORY_PRUNED_Q, EVENT_VERSION, caller),
+            (remove_count, retention_limit),
+        );
+
+        Ok(remove_count)
+    }
+}
+
+/// Computes the integer square root of a 128-bit unsigned integer
+/// for quadratic SLA penalty scaling curves.
+pub fn isqrt(n: u128) -> u128 {
+    if n == 0 {
+        return 0;
+    }
+    if n == 1 {
+        return 1;
+    }
+
+    let mut low: u128 = 1;
+    let mut high: u128 = n / 2 + 1;
+    let mut ans: u128 = 0;
+
+    while low <= high {
+        let mid = low + (high - low) / 2;
+        // Check mid * mid <= n without overflowing by using division
+        if mid <= n / mid {
+            ans = mid;
+            low = mid + 1;
+        } else {
+            if mid == 0 {
+                break;
+            }
+            high = mid - 1;
+        }
+    }
+
+    ans
+}
+
+
+// -----------------------------------------------------------------------
+// #526 – Checked division helper
+// -----------------------------------------------------------------------
+
+/// Checked integer division for SLA math.
+///
+/// Returns `Err(SLAError::InvalidMTTR)` when the divisor is zero instead of
+/// panicking, so callers can surface a typed contract error.
+pub fn checked_div_sla(a: i128, b: i128) -> Result<i128, SLAError> {
+    if b == 0 {
+        return Err(SLAError::InvalidMTTR);
+    }
+    Ok(a / b)
+}
+
+// -----------------------------------------------------------------------
+// #532 – Multi-site outage penalty discount
+// -----------------------------------------------------------------------
+
+/// Discount factor in basis points applied when multiple sites experience
+/// simultaneous regional outages.
+///
+/// | Affected sites | Factor (bps) | Effective charge |
+/// |----------------|--------------|------------------|
+/// | 0 or 1         | 10_000       | 100% (no discount) |
+/// | 2              | 9_000        | 90% |
+/// | 3              | 8_000        | 80% |
+/// | 4+             | 7_000        | 70% (floor) |
+pub fn multi_site_discount_factor_bps(affected_site_count: u32) -> u32 {
+    match affected_site_count {
+        0 | 1 => 10_000,
+        2 => 9_000,
+        3 => 8_000,
+        _ => 7_000,
+    }
+}
+
+/// Apply the multi-site discount factor to a base penalty amount.
+///
+/// `base_penalty` is expected to be non-negative (absolute penalty units).
+/// Returns the discounted penalty, floored at zero via saturating math.
+pub fn apply_multi_site_discount(base_penalty: i128, affected_site_count: u32) -> i128 {
+    if base_penalty <= 0 {
+        return 0;
+    }
+    let factor = multi_site_discount_factor_bps(affected_site_count) as i128;
+    // base * factor / 10_000
+    base_penalty.saturating_mul(factor).saturating_div(10_000)
+}
+
+#[cfg(test)]
+mod math_helpers_tests {
+    use super::*;
+
+    // ── #526 ──────────────────────────────────────────────────────────
+    #[test]
+    fn test_checked_div_sla_happy_path() {
+        assert_eq!(checked_div_sla(100, 4).unwrap(), 25);
+        assert_eq!(checked_div_sla(-100, 4).unwrap(), -25);
+        assert_eq!(checked_div_sla(7, 2).unwrap(), 3);
+    }
+
+    #[test]
+    fn test_checked_div_sla_division_by_zero() {
+        let err = checked_div_sla(42, 0).unwrap_err();
+        assert_eq!(err, SLAError::InvalidMTTR);
+        let err2 = checked_div_sla(0, 0).unwrap_err();
+        assert_eq!(err2, SLAError::InvalidMTTR);
+    }
+
+    // ── #532 ──────────────────────────────────────────────────────────
+    #[test]
+    fn test_multi_site_discount_factor_by_count() {
+        assert_eq!(multi_site_discount_factor_bps(0), 10_000);
+        assert_eq!(multi_site_discount_factor_bps(1), 10_000);
+        assert_eq!(multi_site_discount_factor_bps(2), 9_000);
+        assert_eq!(multi_site_discount_factor_bps(3), 8_000);
+        assert_eq!(multi_site_discount_factor_bps(4), 7_000);
+        assert_eq!(multi_site_discount_factor_bps(10), 7_000);
+    }
+
+    #[test]
+    fn test_apply_multi_site_discount_math() {
+        // Single site: no discount
+        assert_eq!(apply_multi_site_discount(1_000, 1), 1_000);
+        // Two sites: 90%
+        assert_eq!(apply_multi_site_discount(1_000, 2), 900);
+        // Three sites: 80%
+        assert_eq!(apply_multi_site_discount(1_000, 3), 800);
+        // Four+ sites: 70%
+        assert_eq!(apply_multi_site_discount(1_000, 5), 700);
+        // Zero / negative base → 0
+        assert_eq!(apply_multi_site_discount(0, 3), 0);
+        assert_eq!(apply_multi_site_discount(-500, 2), 0);
     }
 }

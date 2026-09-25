@@ -9,12 +9,15 @@
     "build": "tsc",
     "test": "vitest run",
     "test:watch": "vitest",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "generate:types": "ts-node scripts/generate-types.ts"
   },
   "keywords": ["soroban", "stellar", "sla", "noc-iq", "sdk"],
   "license": "MIT",
   "devDependencies": {
     "typescript": "^5.4.0",
-    "vitest": "^1.6.0"
+    "vitest": "^1.6.0",
+    "ts-node": "^10.9.2",
+    "@types/node": "^20.11.0"
   }
 }

@@ -3,6 +3,12 @@ use soroban_sdk::{contracttype, symbol_short, Env, Symbol};
 use crate::{SLAConfig, SLAError, SLAResult, CONFIG_KEY, OPERATOR_KEY};
 
 // -----------------------------------------------------------------------
+// Events (#540)
+// -----------------------------------------------------------------------
+const EVENT_BATCH_CALC: Symbol = symbol_short!("batch_calc");
+const EVENT_VERSION: Symbol = symbol_short!("v1");
+
+// -----------------------------------------------------------------------
 // Types
 // -----------------------------------------------------------------------
 
@@ -44,7 +50,7 @@ pub struct BatchSummary {
     pub failed: u32,
     /// Total rewards from successful calculations.
     pub total_rewards: i128,
-    /// Total penalties from successful calculations.
+    /// Total penalties from successful calculations (signed; negative amounts summed).
     pub total_penalties: i128,
 }
 
@@ -63,6 +69,10 @@ pub struct BatchSummary {
 ///
 /// # Returns
 /// BatchSummary with overall results and individual item outcomes.
+///
+/// # Events
+/// Emits `batch_calc` (#540) with payload
+/// `(total_items, met_count, violation_count, total_penalty)`.
 pub fn batch_calculate(
     env: &Env,
     caller: &soroban_sdk::Address,
@@ -100,19 +110,23 @@ pub fn batch_calculate(
     let mut results = soroban_sdk::Vec::new(env);
     let mut succeeded: u32 = 0;
     let mut failed: u32 = 0;
+    let mut met_count: u32 = 0;
+    let mut violation_count: u32 = 0;
     let mut total_rewards: i128 = 0;
     let mut total_penalties: i128 = 0;
 
     for i in 0..requests.len() {
         let req = requests.get(i).unwrap();
 
-        // Try to calculate
         match process_single(env, &configs, &req) {
             Ok(res) => {
                 succeeded = succeeded.saturating_add(1);
                 if res.status == symbol_short!("viol") {
+                    violation_count = violation_count.saturating_add(1);
+                    // amount is negative for penalties; keep signed sum for BatchSummary.
                     total_penalties = total_penalties.saturating_add(res.amount);
                 } else {
+                    met_count = met_count.saturating_add(1);
                     total_rewards = total_rewards.saturating_add(res.amount);
                 }
                 let mut res_vec = soroban_sdk::Vec::new(env);
@@ -149,6 +163,17 @@ pub fn batch_calculate(
         total_rewards,
         total_penalties,
     };
+
+    // #540 – Emit a single batch_calculated summary event.
+    // topics: (batch_calc, v1, caller)
+    // data:   (total_items, met_count, violation_count, total_penalty)
+    // total_penalty is the absolute (non-negative) sum of penalty amounts.
+    let total_items = requests.len();
+    let total_penalty_abs = total_penalties.abs();
+    env.events().publish(
+        (EVENT_BATCH_CALC, EVENT_VERSION, caller),
+        (total_items, met_count, violation_count, total_penalty_abs),
+    );
 
     Ok((summary, results))
 }
@@ -194,13 +219,14 @@ pub(crate) fn process_single(
             amount: -penalty,
             payment_type: symbol_short!("pen"),
             rating: symbol_short!("poor"),
-            config_version_hash: 0,
+            config_version_hash: crate::compute_config_version_hash(env, configs),
             recorded_at: env.ledger().timestamp(),
         })
     } else {
         // Met
-        let performance_ratio =
-            (req.mttr_minutes as i128).saturating_mul(100).div_euclid(threshold as i128);
+        let performance_ratio = (req.mttr_minutes as i128)
+            .saturating_mul(100)
+            .div_euclid(threshold as i128);
         let (multiplier, rating) = if performance_ratio < 50 {
             (cfg.top_tier_multiplier, symbol_short!("top"))
         } else if performance_ratio < 75 {
@@ -222,7 +248,7 @@ pub(crate) fn process_single(
             amount: reward,
             payment_type: symbol_short!("rew"),
             rating,
-            config_version_hash: 0,
+            config_version_hash: crate::compute_config_version_hash(env, configs),
             recorded_at: env.ledger().timestamp(),
         })
     }
@@ -246,15 +272,40 @@ pub fn validate_batch(
         return Err(SLAError::ThresholdOutOfBounds);
     }
 
-    // Check for duplicate outage IDs
+    // Check for duplicate outage IDs and validate severity symbols (#542)
     let mut seen = soroban_sdk::Map::new(env);
+    let valid_severities = [
+        symbol_short!("critical"),
+        symbol_short!("high"),
+        symbol_short!("medium"),
+        symbol_short!("low"),
+    ];
     for i in 0..requests.len() {
         let req = requests.get(i).unwrap();
         if seen.get(req.outage_id.clone()).unwrap_or(false) {
             return Err(SLAError::DuplicateOutageInput);
         }
-        seen.set(req.outage_id, true);
+        seen.set(req.outage_id.clone(), true);
+
+        if !valid_severities.contains(&req.severity) {
+            return Err(SLAError::InvalidSeverity);
+        }
     }
 
     Ok(requests.len())
+}
+
+/// Find a specific result by outage ID.
+pub fn find_result_by_outage_id(
+    results: &soroban_sdk::Vec<BatchResult>,
+    outage_id: &soroban_sdk::Symbol,
+) -> Option<BatchResult> {
+    for i in 0..results.len() {
+        if let Some(res) = results.get(i) {
+            if res.outage_id == *outage_id {
+                return Some(res);
+            }
+        }
+    }
+    None
 }

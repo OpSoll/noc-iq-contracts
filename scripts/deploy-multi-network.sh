@@ -10,6 +10,7 @@
 #   --admin ADDRESS              Admin address (required)
 #   --operator ADDRESS           Operator address (optional)
 #   --config FILE                Deploy config file (optional)
+#   --manifest FILE              Deployment manifest output path (default: deployment-manifest.json)
 #   --dry-run                    Print actions without executing
 #   --help                       Show this help message
 #
@@ -26,6 +27,7 @@ NETWORKS="TESTNET"
 ADMIN=""
 OPERATOR=""
 CONFIG_FILE=""
+MANIFEST_FILE="deployment-manifest.json"
 DRY_RUN=false
 
 # Colors for output
@@ -57,6 +59,7 @@ usage() {
     echo "  --admin ADDRESS              Admin address (required)"
     echo "  --operator ADDRESS           Operator address (optional, defaults to admin)"
     echo "  --config FILE                Deploy config file (JSON)"
+    echo "  --manifest FILE              Deployment manifest output path (default: deployment-manifest.json)"
     echo "  --dry-run                    Print actions without executing"
     echo "  --help                       Show this help message"
     exit 0
@@ -99,6 +102,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --config)
             CONFIG_FILE="$2"
+            shift 2
+            ;;
+        --manifest)
+            MANIFEST_FILE="$2"
             shift 2
             ;;
         --dry-run)
@@ -218,6 +225,31 @@ for NETWORK in "${NETWORK_ARRAY[@]}"; do
         echo -e "${RED}✗${NC} $NETWORK: $RESULT"
     fi
 done
+
+# Write deployment manifest so contract addresses can be picked up by
+# backend configs / CI without re-parsing script output.
+{
+    echo "{"
+    echo "  \"deployedAt\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\","
+    echo "  \"admin\": \"$ADMIN\","
+    echo "  \"operator\": \"$OPERATOR\","
+    echo "  \"networks\": {"
+    FIRST=true
+    for NETWORK in "${NETWORK_ARRAY[@]}"; do
+        NETWORK=$(echo "$NETWORK" | xargs)
+        RESULT="${DEPLOYMENT_RESULTS[$NETWORK]:-NOT_STARTED}"
+        if [[ "$FIRST" == true ]]; then
+            FIRST=false
+        else
+            echo ","
+        fi
+        printf '    "%s": "%s"' "$NETWORK" "$RESULT"
+    done
+    echo ""
+    echo "  }"
+    echo "}"
+} > "$MANIFEST_FILE"
+log_success "Deployment manifest written to $MANIFEST_FILE"
 
 echo ""
 log_info "Next steps:"
