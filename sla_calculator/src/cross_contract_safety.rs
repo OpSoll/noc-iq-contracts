@@ -29,7 +29,125 @@
 //! let result = safety.finalize()?; // rolls back on error
 //! ```
 
-use soroban_sdk::{contracttype, symbol_short, Address, Env, Symbol, Vec};
+use soroban_sdk::{contracterror, contracttype, symbol_short, Address, Env, Map, Symbol, Vec};
+
+// -----------------------------------------------------------------------
+// Issue #711: cross-contract caller authorization guard
+// -----------------------------------------------------------------------
+
+/// Storage key for the set of contract addresses authorized to invoke
+/// this contract's cross-contract-facing entry points.
+const AUTHORIZED_CALLERS_KEY: Symbol = symbol_short!("XC_CALL");
+/// Storage key for the admin address allowed to manage the caller
+/// registry. Self-contained (no `crate::` dependency), matching the
+/// convention used by other orphaned/self-contained modules in this
+/// crate such as `dispute.rs`.
+const ADMIN_KEY: Symbol = symbol_short!("ADMIN");
+
+#[contracterror]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[repr(u32)]
+pub enum CrossContractSafetyError {
+    NotInitialized = 1,
+    Unauthorized = 2,
+    /// Issue #711: a caller contract not on the authorized registry
+    /// attempted a guarded call.
+    UnauthorizedCaller = 3,
+}
+
+fn load_authorized_callers(env: &Env) -> Map<Address, bool> {
+    env.storage()
+        .instance()
+        .get(&AUTHORIZED_CALLERS_KEY)
+        .unwrap_or(Map::new(env))
+}
+
+fn require_admin(env: &Env, caller: &Address) -> Result<(), CrossContractSafetyError> {
+    caller.require_auth();
+    let admin: Address = env
+        .storage()
+        .instance()
+        .get(&ADMIN_KEY)
+        .ok_or(CrossContractSafetyError::NotInitialized)?;
+    if admin != *caller {
+        return Err(CrossContractSafetyError::Unauthorized);
+    }
+    Ok(())
+}
+
+/// Issue #711: set the admin allowed to manage the authorized-caller
+/// registry. Callable once — subsequent calls are rejected the same way
+/// as any other unauthorized-admin action, since there is no existing
+/// admin to authorize a change.
+pub fn initialize_admin(env: &Env, admin: &Address) -> Result<(), CrossContractSafetyError> {
+    if env.storage().instance().has(&ADMIN_KEY) {
+        return Err(CrossContractSafetyError::Unauthorized);
+    }
+    env.storage().instance().set(&ADMIN_KEY, admin);
+    Ok(())
+}
+
+/// Issue #711: admin-only — add a contract address to the authorized
+/// caller registry.
+pub fn add_authorized_caller(
+    env: &Env,
+    admin: &Address,
+    caller_contract: Address,
+) -> Result<(), CrossContractSafetyError> {
+    require_admin(env, admin)?;
+    let mut callers = load_authorized_callers(env);
+    callers.set(caller_contract, true);
+    env.storage()
+        .instance()
+        .set(&AUTHORIZED_CALLERS_KEY, &callers);
+    Ok(())
+}
+
+/// Issue #711: admin-only — remove a contract address from the
+/// authorized caller registry.
+pub fn remove_authorized_caller(
+    env: &Env,
+    admin: &Address,
+    caller_contract: Address,
+) -> Result<(), CrossContractSafetyError> {
+    require_admin(env, admin)?;
+    let mut callers = load_authorized_callers(env);
+    callers.remove(caller_contract);
+    env.storage()
+        .instance()
+        .set(&AUTHORIZED_CALLERS_KEY, &callers);
+    Ok(())
+}
+
+/// Issue #711: whether `caller_contract` is on the authorized caller
+/// registry.
+pub fn is_authorized_caller(env: &Env, caller_contract: &Address) -> bool {
+    load_authorized_callers(env)
+        .get(caller_contract.clone())
+        .unwrap_or(false)
+}
+
+/// Issue #711: guard for entry points that must only be reachable from
+/// other contracts, not directly. `caller_contract` is the address of
+/// the contract asserting it is the caller — Soroban's SDK does not
+/// expose an ambient "calling contract" the way `env.invoker()` would in
+/// some other VMs, so guarded entry points must accept this as an
+/// explicit parameter identifying the invoking contract (contracts don't
+/// hold signing keys the way user accounts do, so this is a registry
+/// membership check rather than a `require_auth()` call).
+///
+/// # Errors
+/// Returns `UnauthorizedCaller` if `caller_contract` is not on the
+/// registry.
+pub fn require_authorized_caller(
+    env: &Env,
+    caller_contract: &Address,
+) -> Result<(), CrossContractSafetyError> {
+    if !is_authorized_caller(env, caller_contract) {
+        return Err(CrossContractSafetyError::UnauthorizedCaller);
+    }
+    Ok(())
+}
 
 /// Status of a cross-contract call.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -273,5 +391,89 @@ mod tests {
                 assert_ne!(fns[i], fns[j]);
             }
         }
+    }
+
+    #[test]
+    fn test_unregistered_caller_is_rejected() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let cid = env.register_contract(None, crate::SLACalculatorContract);
+        env.as_contract(&cid, || {
+            let admin = Address::generate(&env);
+            initialize_admin(&env, &admin).unwrap();
+
+            let stranger = Address::generate(&env);
+            let result = require_authorized_caller(&env, &stranger);
+            assert_eq!(result, Err(CrossContractSafetyError::UnauthorizedCaller));
+        });
+    }
+
+    #[test]
+    fn test_admin_can_add_and_remove_authorized_caller() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let cid = env.register_contract(None, crate::SLACalculatorContract);
+        let admin = Address::generate(&env);
+        let caller_contract = Address::generate(&env);
+
+        // Each mutating call gets its own `as_contract` scope: the test
+        // utils' mocked-auth machinery treats a repeated `require_auth()`
+        // for the same address within a single top-level `as_contract`
+        // call as a conflicting duplicate, so calls are split the way
+        // separate top-level contract invocations would be in practice.
+        env.as_contract(&cid, || {
+            initialize_admin(&env, &admin).unwrap();
+        });
+        env.as_contract(&cid, || {
+            assert!(!is_authorized_caller(&env, &caller_contract));
+        });
+        env.as_contract(&cid, || {
+            add_authorized_caller(&env, &admin, caller_contract.clone()).unwrap();
+        });
+        env.as_contract(&cid, || {
+            assert!(is_authorized_caller(&env, &caller_contract));
+            assert!(require_authorized_caller(&env, &caller_contract).is_ok());
+        });
+        env.as_contract(&cid, || {
+            remove_authorized_caller(&env, &admin, caller_contract.clone()).unwrap();
+        });
+        env.as_contract(&cid, || {
+            assert!(!is_authorized_caller(&env, &caller_contract));
+            assert_eq!(
+                require_authorized_caller(&env, &caller_contract),
+                Err(CrossContractSafetyError::UnauthorizedCaller)
+            );
+        });
+    }
+
+    #[test]
+    fn test_non_admin_cannot_manage_caller_registry() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let cid = env.register_contract(None, crate::SLACalculatorContract);
+        env.as_contract(&cid, || {
+            let admin = Address::generate(&env);
+            initialize_admin(&env, &admin).unwrap();
+
+            let not_admin = Address::generate(&env);
+            let caller_contract = Address::generate(&env);
+            let result = add_authorized_caller(&env, &not_admin, caller_contract);
+            assert_eq!(result, Err(CrossContractSafetyError::Unauthorized));
+        });
+    }
+
+    #[test]
+    fn test_initialize_admin_rejected_once_already_set() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let cid = env.register_contract(None, crate::SLACalculatorContract);
+        env.as_contract(&cid, || {
+            let admin = Address::generate(&env);
+            initialize_admin(&env, &admin).unwrap();
+
+            let other = Address::generate(&env);
+            let result = initialize_admin(&env, &other);
+            assert_eq!(result, Err(CrossContractSafetyError::Unauthorized));
+        });
     }
 }
