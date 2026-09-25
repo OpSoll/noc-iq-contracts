@@ -1,8 +1,47 @@
-#![no_std]
+use soroban_sdk::{symbol_short, Address, Env, Symbol};
 
-use soroban_sdk::{symbol_short, Env, Symbol};
+use crate::{SLAError, SLAResult, HISTORY_KEY};
 
-use crate::{SLAResult, SLAError, HISTORY_KEY};
+// -----------------------------------------------------------------------
+// Issue #699: operator SLA performance tier badges
+// -----------------------------------------------------------------------
+
+/// Rolling compliance window used for tier assignment.
+const TIER_WINDOW_SECS: u64 = 90 * 24 * 60 * 60;
+
+/// Storage key for per-operator outcome history feeding tier assignment.
+const OPERATOR_OUTCOMES_KEY: Symbol = symbol_short!("OP_HIST");
+
+/// Gold/Silver/Bronze thresholds, in basis points of the rolling
+/// compliance score (10_000 = 100%).
+const GOLD_THRESHOLD_BPS: u32 = 9990; // > 99.9%
+const SILVER_THRESHOLD_BPS: u32 = 9900; // > 99.0%
+const BRONZE_THRESHOLD_BPS: u32 = 9500; // > 95.0%
+
+/// A single recorded SLA outcome for an operator, used to compute their
+/// rolling compliance score.
+#[soroban_sdk::contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OperatorOutcome {
+    /// Ledger timestamp the outcome was recorded at.
+    pub recorded_at: u64,
+    /// Whether the SLA was met (`true`) or violated (`false`).
+    pub met: bool,
+}
+
+/// Issue #699: operator SLA performance tier badge.
+#[soroban_sdk::contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum OperatorTier {
+    /// Rolling 90-day compliance > 99.9%.
+    Gold,
+    /// Rolling 90-day compliance > 99.0%.
+    Silver,
+    /// Rolling 90-day compliance > 95.0%.
+    Bronze,
+    /// Rolling 90-day compliance <= 95.0% (or no history yet).
+    AtRisk,
+}
 
 // -----------------------------------------------------------------------
 // Types
@@ -170,11 +209,10 @@ pub fn calculate_trend_summary(
         total_compliance = total_compliance.saturating_add(trend.compliance_rate_bps as u64);
 
         if trend.calculation_count > 0 {
-            total_mttr = total_mttr.saturating_add(
-                trend.avg_mttr_minutes as u64 * trend.calculation_count as u64,
-            );
-            total_calculations_for_mttr = total_calculations_for_mttr
-                .saturating_add(trend.calculation_count);
+            total_mttr = total_mttr
+                .saturating_add(trend.avg_mttr_minutes as u64 * trend.calculation_count as u64);
+            total_calculations_for_mttr =
+                total_calculations_for_mttr.saturating_add(trend.calculation_count);
         }
 
         // Calculate trend direction (positive = improving compliance)
@@ -207,10 +245,7 @@ pub fn calculate_trend_summary(
 }
 
 /// Get the most recent trend data (last N calculations).
-pub fn get_recent_trend(
-    env: &Env,
-    lookback_count: u32,
-) -> Result<TrendData, SLAError> {
+pub fn get_recent_trend(env: &Env, lookback_count: u32) -> Result<TrendData, SLAError> {
     let history: soroban_sdk::Vec<SLAResult> = env
         .storage()
         .instance()
@@ -237,4 +272,182 @@ pub fn get_recent_trend(
     let to = history.get(len - 1).unwrap().recorded_at;
 
     calculate_trend(env, from, to)
+}
+
+/// Record an SLA outcome for `operator`, feeding the rolling 90-day
+/// compliance score used by `get_operator_tier`.
+pub fn record_operator_outcome(env: &Env, operator: &Address, met: bool) -> Result<(), SLAError> {
+    let mut all: soroban_sdk::Map<Address, soroban_sdk::Vec<OperatorOutcome>> = env
+        .storage()
+        .instance()
+        .get(&OPERATOR_OUTCOMES_KEY)
+        .unwrap_or_else(|| soroban_sdk::Map::new(env));
+
+    let mut history = all
+        .get(operator.clone())
+        .unwrap_or_else(|| soroban_sdk::Vec::new(env));
+    history.push_back(OperatorOutcome {
+        recorded_at: env.ledger().timestamp(),
+        met,
+    });
+
+    all.set(operator.clone(), history);
+    env.storage().instance().set(&OPERATOR_OUTCOMES_KEY, &all);
+
+    Ok(())
+}
+
+/// Issue #699: calculates `operator`'s rolling 90-day SLA compliance
+/// score, in basis points (10_000 = 100%), from outcomes recorded via
+/// `record_operator_outcome`. Outcomes older than `TIER_WINDOW_SECS`
+/// relative to the current ledger timestamp are excluded.
+///
+/// Returns `0` if the operator has no outcomes within the window.
+pub fn calculate_operator_compliance_bps(env: &Env, operator: &Address) -> u32 {
+    let all: soroban_sdk::Map<Address, soroban_sdk::Vec<OperatorOutcome>> = env
+        .storage()
+        .instance()
+        .get(&OPERATOR_OUTCOMES_KEY)
+        .unwrap_or_else(|| soroban_sdk::Map::new(env));
+
+    let history = match all.get(operator.clone()) {
+        Some(h) => h,
+        None => return 0,
+    };
+
+    let now = env.ledger().timestamp();
+    let window_start = now.saturating_sub(TIER_WINDOW_SECS);
+
+    let mut total: u32 = 0;
+    let mut met_count: u32 = 0;
+    for outcome in history.iter() {
+        if outcome.recorded_at < window_start {
+            continue;
+        }
+        total = total.saturating_add(1);
+        if outcome.met {
+            met_count = met_count.saturating_add(1);
+        }
+    }
+
+    if total == 0 {
+        0
+    } else {
+        (met_count as u64 * 10_000 / total as u64) as u32
+    }
+}
+
+/// Issue #699 acceptance criterion: `get_operator_tier` getter — maps
+/// `operator`'s rolling 90-day compliance score to a `Gold` / `Silver` /
+/// `Bronze` / `AtRisk` badge.
+pub fn get_operator_tier(env: &Env, operator: &Address) -> OperatorTier {
+    let compliance_bps = calculate_operator_compliance_bps(env, operator);
+
+    if compliance_bps > GOLD_THRESHOLD_BPS {
+        OperatorTier::Gold
+    } else if compliance_bps > SILVER_THRESHOLD_BPS {
+        OperatorTier::Silver
+    } else if compliance_bps > BRONZE_THRESHOLD_BPS {
+        OperatorTier::Bronze
+    } else {
+        OperatorTier::AtRisk
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use soroban_sdk::testutils::{Address as _, Ledger};
+    use soroban_sdk::Address;
+
+    fn record_n(env: &Env, operator: &Address, met_count: u32, violation_count: u32) {
+        for _ in 0..met_count {
+            record_operator_outcome(env, operator, true).unwrap();
+        }
+        for _ in 0..violation_count {
+            record_operator_outcome(env, operator, false).unwrap();
+        }
+    }
+
+    #[test]
+    fn test_operator_with_no_history_is_at_risk() {
+        let env = Env::default();
+        let cid = env.register_contract(None, crate::SLACalculatorContract);
+        let operator = Address::generate(&env);
+
+        env.as_contract(&cid, || {
+            assert_eq!(get_operator_tier(&env, &operator), OperatorTier::AtRisk);
+        });
+    }
+
+    #[test]
+    fn test_tier_boundaries() {
+        let env = Env::default();
+        let cid = env.register_contract(None, crate::SLACalculatorContract);
+
+        // Gold: > 99.9% — 1000 met, 0 violations = 100%.
+        let gold_op = Address::generate(&env);
+        env.as_contract(&cid, || {
+            record_n(&env, &gold_op, 1000, 0);
+            assert_eq!(get_operator_tier(&env, &gold_op), OperatorTier::Gold);
+        });
+
+        // Silver: > 99.0% and <= 99.9% — 995 met, 5 violated = 99.5%.
+        let silver_op = Address::generate(&env);
+        env.as_contract(&cid, || {
+            record_n(&env, &silver_op, 995, 5);
+            assert_eq!(get_operator_tier(&env, &silver_op), OperatorTier::Silver);
+        });
+
+        // Bronze: > 95.0% and <= 99.0% — 97 met, 3 violated = 97%.
+        let bronze_op = Address::generate(&env);
+        env.as_contract(&cid, || {
+            record_n(&env, &bronze_op, 97, 3);
+            assert_eq!(get_operator_tier(&env, &bronze_op), OperatorTier::Bronze);
+        });
+
+        // AtRisk: <= 95.0% — 90 met, 10 violated = 90%.
+        let at_risk_op = Address::generate(&env);
+        env.as_contract(&cid, || {
+            record_n(&env, &at_risk_op, 90, 10);
+            assert_eq!(get_operator_tier(&env, &at_risk_op), OperatorTier::AtRisk);
+        });
+    }
+
+    #[test]
+    fn test_outcomes_outside_90_day_window_are_excluded() {
+        let env = Env::default();
+        let cid = env.register_contract(None, crate::SLACalculatorContract);
+        let operator = Address::generate(&env);
+
+        env.ledger().set_timestamp(1_000);
+        env.as_contract(&cid, || {
+            // All violations, far in the past.
+            record_n(&env, &operator, 0, 50);
+        });
+
+        // Jump forward past the 90-day window and record a clean record.
+        env.ledger().set_timestamp(1_000 + TIER_WINDOW_SECS + 1);
+        env.as_contract(&cid, || {
+            record_n(&env, &operator, 10, 0);
+            // Only the 10 recent "met" outcomes are in-window now.
+            assert_eq!(get_operator_tier(&env, &operator), OperatorTier::Gold);
+        });
+    }
+
+    #[test]
+    fn test_operator_histories_are_independent() {
+        let env = Env::default();
+        let cid = env.register_contract(None, crate::SLACalculatorContract);
+        let op_a = Address::generate(&env);
+        let op_b = Address::generate(&env);
+
+        env.as_contract(&cid, || {
+            record_n(&env, &op_a, 1000, 0);
+            record_n(&env, &op_b, 0, 1000);
+
+            assert_eq!(get_operator_tier(&env, &op_a), OperatorTier::Gold);
+            assert_eq!(get_operator_tier(&env, &op_b), OperatorTier::AtRisk);
+        });
+    }
 }
