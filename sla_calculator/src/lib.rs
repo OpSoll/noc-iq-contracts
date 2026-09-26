@@ -58,7 +58,7 @@ const RETENTION_LIMIT_KEY: Symbol = symbol_short!("RETLIM"); // SC-013: configur
 const PROPOSAL_EXPIRATION_SECONDS: u64 = 604800; // 7 days in seconds
 const MIGRATION_KEY: Symbol = symbol_short!("MIGKEY"); // #577
 const MIGRATION_TIME_KEY: Symbol = symbol_short!("MIGTIME"); // #577
-const MIGRATION_TIMELock: u64 = 1_209_600; // 14 days in seconds
+const MIGRATION_TIMELOCK: u64 = 1_209_600; // 14 days in seconds
 const CONFIG_UPD_COUNT_KEY: Symbol = symbol_short!("CFGUPDCT"); // #560: total config updates
 const MAX_OUTAGE_DURATION_KEY: Symbol = symbol_short!("MAX_DUR"); // #671: max single outage duration cap
 const DEFAULT_MAX_OUTAGE_DURATION_MINUTES: u32 = 10_080; // 7 days in minutes (7 * 24 * 60)
@@ -116,7 +116,6 @@ const EVENT_ROLE_AUDIT: Symbol = symbol_short!("role_aud"); // #576
 const EVENT_MIGRATION_SET: Symbol = symbol_short!("migr_set"); // #577
 const EVENT_MIGRATION_ACT: Symbol = symbol_short!("migr_act"); // #577
 const EVENT_HISTORY_PRUNED_Q: Symbol = symbol_short!("hist_pq"); // #578
-const EVENT_OUTAGE_DURATION_CAPPED: Symbol = symbol_short!("dur_cap"); // #671
 const EVENT_VERSION: Symbol = symbol_short!("v1");
 
 // -----------------------------------------------------------------------
@@ -192,11 +191,11 @@ pub struct SLAResult {
     pub status: Symbol, // "met" | "viol"
     pub mttr_minutes: u32,
     pub threshold_minutes: u32,
-    pub amount: i128,             // negative = penalty, positive = reward
-    pub payment_type: Symbol,     // "rew" | "pen"
-    pub rating: Symbol,           // "top" | "excel" | "good" | "poor"
+    pub amount: i128,         // negative = penalty, positive = reward
+    pub payment_type: Symbol, // "rew" | "pen"
+    pub rating: Symbol,       // "top" | "excel" | "good" | "poor"
     pub config_version_hash: soroban_sdk::BytesN<32>, // deterministic binding to config used for evaluation
-    pub recorded_at: u64,         // SC-063: ledger timestamp at calculation time
+    pub recorded_at: u64, // SC-063: ledger timestamp at calculation time
 }
 
 #[contracttype]
@@ -364,7 +363,7 @@ pub fn compute_config_version_hash(
     env: &Env,
     configs: &soroban_sdk::Map<Symbol, SLAConfig>,
 ) -> soroban_sdk::BytesN<32> {
-    env.crypto().sha256(&configs.to_xdr(env)).into()
+    env.crypto().sha256(&configs.clone().to_xdr(env)).into()
 }
 
 // -----------------------------------------------------------------------
@@ -1478,7 +1477,8 @@ impl SLACalculatorContract {
         if let Some(prev) = existing {
             // Explicit duplicate policy: same outage_id is idempotent only when
             // execution inputs resolve to the same deterministic result.
-            if prev.mttr_minutes != effective_mttr || prev.threshold_minutes != cfg.threshold_minutes
+            if prev.mttr_minutes != effective_mttr
+                || prev.threshold_minutes != cfg.threshold_minutes
             {
                 return Err(SLAError::DuplicateOutageInput);
             }
@@ -1573,7 +1573,7 @@ impl SLACalculatorContract {
         outage_id: Symbol,
         mttr_minutes: u32,
         cfg: &SLAConfig,
-        config_version_hash: u64,
+        config_version_hash: soroban_sdk::BytesN<32>,
         recorded_at: u64,
     ) -> Result<SLAResult, SLAError> {
         let threshold = cfg.threshold_minutes;
@@ -1688,14 +1688,6 @@ impl SLACalculatorContract {
         Ok(())
     }
 
-    /// Validates symbol inputs used in outage / severity fields.
-    ///
-    /// - `_env` is accepted for API consistency with other validation helpers
-    ///   (and future Env-backed checks).
-    /// - When `is_outage_id` is false the symbol must match a canonical severity
-    ///   (`critical`, `high`, `medium`, `low`); otherwise `InvalidSeverity` is returned.
-    /// - Outage IDs rely on Soroban's native Symbol constraints (non-empty, ≤32, charset).
-
     /// #551 – Populate sensible default SLA configurations for all severity tiers.
     ///
     /// Defaults:
@@ -1752,6 +1744,13 @@ impl SLACalculatorContract {
         configs
     }
 
+    /// Validates symbol inputs used in outage / severity fields.
+    ///
+    /// - `_env` is accepted for API consistency with other validation helpers
+    ///   (and future Env-backed checks).
+    /// - When `is_outage_id` is false the symbol must match a canonical severity
+    ///   (`critical`, `high`, `medium`, `low`); otherwise `InvalidSeverity` is returned.
+    /// - Outage IDs rely on Soroban's native Symbol constraints (non-empty, ≤32, charset).
     fn validate_symbol_input(
         _env: &Env,
         symbol: &Symbol,
@@ -2358,7 +2357,7 @@ impl SLACalculatorContract {
     pub fn set_retention_limit(env: Env, caller: Address, limit: u32) -> Result<(), SLAError> {
         Self::check_version(&env)?;
         Self::require_admin(&env, &caller)?;
-        if limit < 50 || limit > 5000 {
+        if !(50..=5000).contains(&limit) {
             return Err(SLAError::RetentionLimitOutOfRange);
         }
         env.storage().instance().set(&RETENTION_LIMIT_KEY, &limit);
@@ -2469,7 +2468,9 @@ impl SLACalculatorContract {
         Self::require_admin(&env, &caller)?;
 
         let now = env.ledger().timestamp();
-        env.storage().instance().set(&MIGRATION_KEY, &migration_address);
+        env.storage()
+            .instance()
+            .set(&MIGRATION_KEY, &migration_address);
         env.storage().instance().set(&MIGRATION_TIME_KEY, &now);
 
         env.events().publish(
@@ -2503,7 +2504,7 @@ impl SLACalculatorContract {
             .ok_or(SLAError::NotInitialized)?;
 
         let now = env.ledger().timestamp();
-        if now.saturating_sub(set_time) < MIGRATION_TIMELock {
+        if now.saturating_sub(set_time) < MIGRATION_TIMELOCK {
             return Err(SLAError::ThresholdOutOfBounds);
         }
 
@@ -2602,7 +2603,6 @@ pub fn isqrt(n: u128) -> u128 {
 
     ans
 }
-
 
 // -----------------------------------------------------------------------
 // #526 – Checked division helper
@@ -2796,11 +2796,8 @@ mod outage_cap_tests {
         assert_eq!(res.mttr_minutes, 1_000);
 
         // View mode also respects the configured cap
-        let view_res = client.calculate_sla_view(
-            &symbol_short!("OUT_V"),
-            &symbol_short!("high"),
-            &3_000,
-        );
+        let view_res =
+            client.calculate_sla_view(&symbol_short!("OUT_V"), &symbol_short!("high"), &3_000);
         assert_eq!(view_res.mttr_minutes, 1_000);
     }
 }

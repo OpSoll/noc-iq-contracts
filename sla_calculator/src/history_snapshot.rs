@@ -1,5 +1,5 @@
-use soroban_sdk::{contracterror, contracttype, symbol_short, Env, Symbol, Vec};
 use crate::SLAResult;
+use soroban_sdk::{contracterror, contracttype, symbol_short, Env, Symbol, Vec};
 
 // -----------------------------------------------------------------------
 // Storage keys & events
@@ -139,8 +139,12 @@ pub fn has_monthly_sla_snapshot(env: &Env, month_index: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use soroban_sdk::{symbol_short, testutils::Address as _, Address, Env};
     use crate::{SLACalculatorContract, SLACalculatorContractClient};
+    use soroban_sdk::{
+        symbol_short,
+        testutils::{Address as _, Ledger as _},
+        Address, Env,
+    };
 
     #[test]
     fn test_snapshot_monthly_sla_storage_layout() {
@@ -157,14 +161,9 @@ mod tests {
 
             assert!(!has_monthly_sla_snapshot(&env, month_index));
 
-            let snapshot = snapshot_monthly_sla(
-                &env,
-                month_index,
-                total_downtime,
-                mttr,
-                status.clone(),
-            )
-            .unwrap();
+            let snapshot =
+                snapshot_monthly_sla(&env, month_index, total_downtime, mttr, status.clone())
+                    .unwrap();
 
             assert_eq!(snapshot.month_index, month_index);
             assert_eq!(snapshot.total_downtime_minutes, total_downtime);
@@ -192,29 +191,23 @@ mod tests {
         env.as_contract(&cid, || {
             let month_index = 202609;
 
-            let first_snap = snapshot_monthly_sla(
-                &env,
-                month_index,
-                100,
-                25,
-                symbol_short!("met"),
-            )
-            .unwrap();
+            let first_snap =
+                snapshot_monthly_sla(&env, month_index, 100, 25, symbol_short!("met")).unwrap();
 
             // Attempting to overwrite the finalized snapshot must fail with AlreadyFinalized
-            let result = snapshot_monthly_sla(
-                &env,
-                month_index,
-                500,
-                120,
-                symbol_short!("viol"),
-            );
+            let result = snapshot_monthly_sla(&env, month_index, 500, 120, symbol_short!("viol"));
             assert_eq!(result, Err(SnapshotError::AlreadyFinalized));
 
             // Verify the original snapshot was not modified
             let stored = get_monthly_sla_snapshot(&env, month_index).unwrap();
-            assert_eq!(stored.total_downtime_minutes, first_snap.total_downtime_minutes);
-            assert_eq!(stored.final_compliance_status, first_snap.final_compliance_status);
+            assert_eq!(
+                stored.total_downtime_minutes,
+                first_snap.total_downtime_minutes
+            );
+            assert_eq!(
+                stored.final_compliance_status,
+                first_snap.final_compliance_status
+            );
         });
     }
 
@@ -238,8 +231,18 @@ mod tests {
         let admin = Address::generate(&env);
         let operator = Address::generate(&env);
         client.initialize(&admin, &operator);
-        client.calculate_sla(&operator, &symbol_short!("OUT1"), &symbol_short!("high"), &10);
-        client.calculate_sla(&operator, &symbol_short!("OUT2"), &symbol_short!("high"), &10);
+        client.calculate_sla(
+            &operator,
+            &symbol_short!("OUT1"),
+            &symbol_short!("high"),
+            &10,
+        );
+        client.calculate_sla(
+            &operator,
+            &symbol_short!("OUT2"),
+            &symbol_short!("high"),
+            &10,
+        );
         let stats = client.get_stats();
         assert_eq!(stats.total_calculations, 2);
     }

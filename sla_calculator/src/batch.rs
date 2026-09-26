@@ -318,9 +318,7 @@ pub fn get_batch_downtime(
     for i in 0..site_ids.len() {
         let site_id = site_ids.get(i).unwrap();
 
-        let total_downtime = downtime_by_site
-            .get(site_id.clone())
-            .unwrap_or(0u64);
+        let total_downtime = downtime_by_site.get(site_id.clone()).unwrap_or(0u64);
 
         let compliance_status = match compliant_by_site.get(site_id.clone()) {
             None => symbol_short!("unknown"),

@@ -437,9 +437,7 @@ pub fn get_grace_period_duration(env: &Env) -> u64 {
         .unwrap_or(DEFAULT_GRACE_PERIOD_SECONDS)
 }
 
-fn load_service_registrations(
-    env: &Env,
-) -> soroban_sdk::Map<Address, ServiceRegistrationRecord> {
+fn load_service_registrations(env: &Env) -> soroban_sdk::Map<Address, ServiceRegistrationRecord> {
     env.storage()
         .instance()
         .get(&SERVICE_REG_KEY)
@@ -476,10 +474,7 @@ pub fn register_service(
 }
 
 /// Returns the registration record for `service`, if any.
-pub fn get_service_registration(
-    env: &Env,
-    service: &Address,
-) -> Option<ServiceRegistrationRecord> {
+pub fn get_service_registration(env: &Env, service: &Address) -> Option<ServiceRegistrationRecord> {
     load_service_registrations(env).get(service.clone())
 }
 
@@ -492,7 +487,10 @@ pub fn is_service_in_grace_period(env: &Env, service: &Address) -> bool {
     };
 
     let current_time = env.ledger().timestamp();
-    current_time < record.registered_at.saturating_add(record.grace_period_seconds)
+    current_time
+        < record
+            .registered_at
+            .saturating_add(record.grace_period_seconds)
 }
 
 /// Evaluates penalty payout for an outage on a service.
@@ -518,7 +516,10 @@ pub fn evaluate_outage_penalty_with_grace(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use soroban_sdk::{testutils::Address as _, Address, Env};
+    use soroban_sdk::{
+        testutils::{Address as _, Ledger as _},
+        Address, Env,
+    };
 
     fn setup(env: &Env, admin: &Address) {
         env.storage().instance().set(&ADMIN_KEY, admin);

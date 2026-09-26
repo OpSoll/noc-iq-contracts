@@ -96,11 +96,7 @@ pub fn propose_tier_table(
 ) -> Result<u64, SLAError> {
     require_admin(env, caller)?;
 
-    let current_id: u64 = env
-        .storage()
-        .instance()
-        .get(&TIER_PROP_ID_KEY)
-        .unwrap_or(0);
+    let current_id: u64 = env.storage().instance().get(&TIER_PROP_ID_KEY).unwrap_or(0);
     let next_id = current_id.saturating_add(1);
     env.storage().instance().set(&TIER_PROP_ID_KEY, &next_id);
 
@@ -111,7 +107,9 @@ pub fn propose_tier_table(
         proposed_at: env.ledger().timestamp(),
     };
 
-    env.storage().instance().set(&PENDING_TIER_PROP_KEY, &proposal);
+    env.storage()
+        .instance()
+        .set(&PENDING_TIER_PROP_KEY, &proposal);
 
     env.events().publish(
         (EVENT_TIER_PROP, EVENT_VERSION, caller),
@@ -176,8 +174,7 @@ pub fn lookup_penalty_rate_bps(env: &Env, availability_bps: u32) -> u32 {
     for i in 0..table.brackets.len() {
         let bracket = table.brackets.get(i).unwrap();
         if availability_bps >= bracket.min_availability_bps
-            && (availability_bps < bracket.max_availability_bps
-                || availability_bps == bracket.max_availability_bps)
+            && availability_bps <= bracket.max_availability_bps
         {
             return bracket.penalty_rate_bps;
         }
@@ -331,12 +328,8 @@ mod threshold_tests {
                 good_tier_multiplier: 100,
             },
         );
-        let result = client.calculate_sla(
-            &operator,
-            &symbol_short!("OUT1"),
-            &symbol_short!("low"),
-            &1,
-        );
+        let result =
+            client.calculate_sla(&operator, &symbol_short!("OUT1"), &symbol_short!("low"), &1);
         assert_eq!(result.status, symbol_short!("viol"));
     }
 
@@ -356,20 +349,12 @@ mod threshold_tests {
                 good_tier_multiplier: 100,
             },
         );
-        let met = client.calculate_sla(
-            &operator,
-            &symbol_short!("OUT2"),
-            &symbol_short!("low"),
-            &1,
-        );
+        let met =
+            client.calculate_sla(&operator, &symbol_short!("OUT2"), &symbol_short!("low"), &1);
         assert_eq!(met.status, symbol_short!("met"));
 
-        let viol = client.calculate_sla(
-            &operator,
-            &symbol_short!("OUT3"),
-            &symbol_short!("low"),
-            &2,
-        );
+        let viol =
+            client.calculate_sla(&operator, &symbol_short!("OUT3"), &symbol_short!("low"), &2);
         assert_eq!(viol.status, symbol_short!("viol"));
     }
 }

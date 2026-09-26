@@ -1,5 +1,9 @@
-use soroban_sdk::{symbol_short, Address, Env, Symbol, Vec};
+extern crate alloc;
+
+use alloc::format;
+
 use soroban_sdk::testutils::Address as _;
+use soroban_sdk::{symbol_short, Address, Env, Symbol, Vec};
 
 use crate::{SLACalculatorContract, SLAResult};
 

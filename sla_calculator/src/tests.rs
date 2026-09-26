@@ -8277,7 +8277,11 @@ fn test_event_topics_follow_three_tuple_format() {
         let t0: Symbol = topics.get(0).unwrap().try_into_val(&env).unwrap();
         if t0 == symbol_short!("sla_calc") {
             found_sla_calc = true;
-            assert_eq!(topics.len(), 3, "sla_calc must have exactly 3 topic elements");
+            assert_eq!(
+                topics.len(),
+                3,
+                "sla_calc must have exactly 3 topic elements"
+            );
             let t1: Symbol = topics.get(1).unwrap().try_into_val(&env).unwrap();
             assert_eq!(t1, EVENT_VERSION);
         }
@@ -9269,7 +9273,10 @@ fn test_role_audit_event_emitted_on_set_operator() {
             assert_eq!(payload.0, symbol_short!("operator"));
         }
     }
-    assert!(found_audit, "role_aud event must be emitted on set_operator");
+    assert!(
+        found_audit,
+        "role_aud event must be emitted on set_operator"
+    );
 }
 
 #[test]
@@ -9292,7 +9299,10 @@ fn test_role_audit_event_emitted_on_accept_admin() {
             assert!(payload.2, "new_present should be true");
         }
     }
-    assert!(found_audit, "role_aud event must be emitted on accept_admin");
+    assert!(
+        found_audit,
+        "role_aud event must be emitted on accept_admin"
+    );
 }
 
 #[test]
@@ -9311,7 +9321,10 @@ fn test_role_audit_event_emitted_on_accept_operator() {
             found_audit = true;
         }
     }
-    assert!(found_audit, "role_aud event must be emitted on accept_operator");
+    assert!(
+        found_audit,
+        "role_aud event must be emitted on accept_operator"
+    );
 }
 
 // ============================================================
@@ -9343,7 +9356,10 @@ fn test_execute_migration_rejected_before_timelock() {
     client.set_migration_key(&actors.admin, &migr_addr);
 
     let result = client.try_execute_migration(&migr_addr);
-    assert!(result.is_err(), "migration must be rejected before 14-day timelock");
+    assert!(
+        result.is_err(),
+        "migration must be rejected before 14-day timelock"
+    );
 }
 
 #[test]
@@ -9354,7 +9370,10 @@ fn test_execute_migration_rejected_by_non_key_holder() {
     client.set_migration_key(&actors.admin, &migr_addr);
 
     let result = client.try_execute_migration(&other);
-    assert!(result.is_err(), "migration must be rejected by non-key holder");
+    assert!(
+        result.is_err(),
+        "migration must be rejected by non-key holder"
+    );
 }
 
 // ============================================================
@@ -9367,25 +9386,26 @@ fn test_prune_history_queue_removes_oldest_when_over_limit() {
     // Fill history with default limit (1000) to exceed future limit
     for i in 0..60 {
         let outage_id = symbol(&env, &format!("PRUNE_{}", i));
-        let _ = client.calculate_sla(
-            &actors.operator,
-            &outage_id,
-            &symbol_short!("high"),
-            &10,
-        );
+        let _ = client.calculate_sla(&actors.operator, &outage_id, &symbol_short!("high"), &10);
     }
 
     // Lower retention limit (does not retroactively prune)
     client.set_retention_limit(&actors.admin, &50);
 
     let before = client.get_history();
-    assert!(before.len() > 50, "history should exceed limit before prune");
+    assert!(
+        before.len() > 50,
+        "history should exceed limit before prune"
+    );
 
     let pruned = client.prune_history_queue(&actors.admin);
     assert!(pruned > 0, "should prune some entries");
 
     let after = client.get_history();
-    assert!(after.len() <= 50, "history should be at or below limit after prune");
+    assert!(
+        after.len() <= 50,
+        "history should be at or below limit after prune"
+    );
 }
 
 #[test]
@@ -9456,7 +9476,7 @@ mod test {
         let results = BatchExecutionManager::process_batch(&env, item_ids);
 
         assert_eq!(results.len(), 2);
-        
+
         for result in results.iter() {
             assert_eq!(result.recorded_at, 1710000000);
             assert!(result.success);
@@ -9476,8 +9496,14 @@ mod test {
         assert_eq!(SLARatingClassifier::classify_sla(85), SLARating::Viol);
 
         // Verify symbol mappings
-        assert_eq!(SLARatingClassifier::to_symbol(&SLARating::Top), symbol_short!("top"));
-        assert_eq!(SLARatingClassifier::to_symbol(&SLARating::Viol), symbol_short!("viol"));
+        assert_eq!(
+            SLARatingClassifier::to_symbol(&SLARating::Top),
+            symbol_short!("top")
+        );
+        assert_eq!(
+            SLARatingClassifier::to_symbol(&SLARating::Viol),
+            symbol_short!("viol")
+        );
     }
 }
 
@@ -9516,7 +9542,7 @@ mod test {
 #[test]
 fn test_issue_527_saturating_add_prevents_overflow() {
     let (env, client, actors) = setup();
-    
+
     // Simulate setting a config that gives extreme rewards to trigger overflow
     client.set_config(
         &actors.admin,
@@ -9530,8 +9556,18 @@ fn test_issue_527_saturating_add_prevents_overflow() {
     );
 
     // Call it twice to cross the i128::MAX boundary
-    client.calculate_sla(&actors.operator, &symbol(&env, "INC_O1"), &symbol_short!("critical"), &0);
-    client.calculate_sla(&actors.operator, &symbol(&env, "INC_O2"), &symbol_short!("critical"), &0);
+    client.calculate_sla(
+        &actors.operator,
+        &symbol(&env, "INC_O1"),
+        &symbol_short!("critical"),
+        &0,
+    );
+    client.calculate_sla(
+        &actors.operator,
+        &symbol(&env, "INC_O2"),
+        &symbol_short!("critical"),
+        &0,
+    );
 
     let stats = client.get_stats();
     // It should cap at i128::MAX, not panic
@@ -9542,7 +9578,7 @@ fn test_issue_527_saturating_add_prevents_overflow() {
 fn test_issue_547_payload_size_test() {
     let env = Env::default();
     let mut results = soroban_sdk::Vec::new(&env);
-    
+
     for i in 0..50 {
         let mut sla_results = soroban_sdk::Vec::new(&env);
         sla_results.push_back(crate::SLAResult {
@@ -9574,7 +9610,7 @@ fn test_issue_547_payload_size_test() {
 fn test_issue_543_find_result_by_outage_id() {
     let env = Env::default();
     let mut results = soroban_sdk::Vec::new(&env);
-    
+
     let target_id = symbol_short!("INC_T");
     let mut sla_results = soroban_sdk::Vec::new(&env);
     let target_result = crate::batch::BatchResult {
@@ -9630,7 +9666,6 @@ mod isqrt_tests {
     }
 }
 
-
 // ============================================================
 // #540 – batch_calculated event emission
 // ============================================================
@@ -9658,7 +9693,10 @@ fn test_batch_calculate_emits_batch_calc_event() {
     assert_eq!(summary.succeeded, 2);
 
     let events = env.events().all();
-    assert!(events.len() > before, "batch_calculate must emit at least one event");
+    assert!(
+        events.len() > before,
+        "batch_calculate must emit at least one event"
+    );
 
     // Find the batch_calc event (last event from this call should be the summary).
     let (_, topics, data) = events.last().unwrap();
@@ -9713,7 +9751,6 @@ fn test_config_updated_event_emitted_on_set_config() {
     let payload: (u32, i128, i128) = data.try_into_val(&env).unwrap();
     assert_eq!(payload, (45u32, 75i128, 400i128));
 }
-
 
 // ============================================================
 // #539 – Batch calculation CPU instruction budget (50 items)
