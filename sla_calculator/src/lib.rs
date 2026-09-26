@@ -16,7 +16,9 @@ pub mod batch;
 pub mod coordination_harness;
 pub mod cross_contract_safety;
 pub mod event_correlation;
+pub mod event_payload_guard;
 mod event_schema;
+pub mod resolution_delay;
 pub mod storage_helpers;
 pub mod version_negotiation;
 
