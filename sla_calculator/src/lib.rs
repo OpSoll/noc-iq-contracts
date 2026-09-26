@@ -28,11 +28,14 @@ pub mod event_payload_guard;
 mod event_schema;
 pub mod event_ttl_refresh;
 pub mod force_majeure;
+pub mod history_snapshot;
 pub mod outage_correlation_tag;
 pub mod resolution_delay;
 pub mod state_integrity;
 pub mod storage_helpers;
+pub mod threshold_config;
 pub mod version_negotiation;
+pub mod whitelist;
 pub mod zero_downtime_bonus;
 // -----------------------------------------------------------------------
 // Storage keys
@@ -57,6 +60,8 @@ const MIGRATION_KEY: Symbol = symbol_short!("MIGKEY"); // #577
 const MIGRATION_TIME_KEY: Symbol = symbol_short!("MIGTIME"); // #577
 const MIGRATION_TIMELock: u64 = 1_209_600; // 14 days in seconds
 const CONFIG_UPD_COUNT_KEY: Symbol = symbol_short!("CFGUPDCT"); // #560: total config updates
+const MAX_OUTAGE_DURATION_KEY: Symbol = symbol_short!("MAX_DUR"); // #671: max single outage duration cap
+const DEFAULT_MAX_OUTAGE_DURATION_MINUTES: u32 = 10_080; // 7 days in minutes (7 * 24 * 60)
 
 // -----------------------------------------------------------------------
 // Events
@@ -111,6 +116,7 @@ const EVENT_ROLE_AUDIT: Symbol = symbol_short!("role_aud"); // #576
 const EVENT_MIGRATION_SET: Symbol = symbol_short!("migr_set"); // #577
 const EVENT_MIGRATION_ACT: Symbol = symbol_short!("migr_act"); // #577
 const EVENT_HISTORY_PRUNED_Q: Symbol = symbol_short!("hist_pq"); // #578
+const EVENT_OUTAGE_DURATION_CAPPED: Symbol = symbol_short!("dur_cap"); // #671
 const EVENT_VERSION: Symbol = symbol_short!("v1");
 
 // -----------------------------------------------------------------------
@@ -1186,6 +1192,17 @@ impl SLACalculatorContract {
             .ok_or(SLAError::ConfigNotFound)?;
         let config_version_hash = Self::compute_config_version_hash(&env, &configs)?;
 
+        let max_duration = env
+            .storage()
+            .instance()
+            .get(&MAX_OUTAGE_DURATION_KEY)
+            .unwrap_or(DEFAULT_MAX_OUTAGE_DURATION_MINUTES);
+        let effective_mttr = if mttr_minutes > max_duration {
+            max_duration
+        } else {
+            mttr_minutes
+        };
+
         // Delegate to pure internal math without mutating state or emitting events.
 
         // Use the current ledger timestamp so the view result matches the mutating
@@ -1193,7 +1210,7 @@ impl SLACalculatorContract {
         // any state writes or event emission.
         Self::compute_result(
             outage_id,
-            mttr_minutes,
+            effective_mttr,
             &cfg,
             config_version_hash,
             env.ledger().timestamp(),
@@ -1417,9 +1434,30 @@ impl SLACalculatorContract {
             .get(severity.clone())
             .ok_or(SLAError::ConfigNotFound)?;
         let config_version_hash = Self::compute_config_version_hash(&env, &configs)?;
+
+        // #671: Enforce maximum single outage duration cap
+        let max_duration = env
+            .storage()
+            .instance()
+            .get(&MAX_OUTAGE_DURATION_KEY)
+            .unwrap_or(DEFAULT_MAX_OUTAGE_DURATION_MINUTES);
+
+        let effective_mttr = if mttr_minutes > max_duration {
+            Self::publish_outage_duration_capped_event(
+                &env,
+                &caller,
+                &outage_id,
+                mttr_minutes,
+                max_duration,
+            );
+            max_duration
+        } else {
+            mttr_minutes
+        };
+
         let result = Self::compute_result(
             outage_id.clone(),
-            mttr_minutes,
+            effective_mttr,
             &cfg,
             config_version_hash,
             env.ledger().timestamp(),
@@ -1440,7 +1478,7 @@ impl SLACalculatorContract {
         if let Some(prev) = existing {
             // Explicit duplicate policy: same outage_id is idempotent only when
             // execution inputs resolve to the same deterministic result.
-            if prev.mttr_minutes != mttr_minutes || prev.threshold_minutes != cfg.threshold_minutes
+            if prev.mttr_minutes != effective_mttr || prev.threshold_minutes != cfg.threshold_minutes
             {
                 return Err(SLAError::DuplicateOutageInput);
             }
@@ -1494,9 +1532,18 @@ impl SLACalculatorContract {
     /// (0 in view/audit mode).
     /// Pure core calculation logic used by both calculate_sla and simulate_sla
     /// Extracts the essential SLA computation without any side effects
-    fn compute_sla(_env: &Env, config: &SLAConfig, outage: &OutageInput) -> SlaSimulationResult {
+    fn compute_sla(env: &Env, config: &SLAConfig, outage: &OutageInput) -> SlaSimulationResult {
+        let max_duration = env
+            .storage()
+            .instance()
+            .get(&MAX_OUTAGE_DURATION_KEY)
+            .unwrap_or(DEFAULT_MAX_OUTAGE_DURATION_MINUTES);
+        let mttr_minutes = if outage.mttr_minutes > max_duration {
+            max_duration
+        } else {
+            outage.mttr_minutes
+        };
         let threshold = config.threshold_minutes;
-        let mttr_minutes = outage.mttr_minutes;
 
         let is_breach = mttr_minutes > threshold;
         let penalty_amount = if is_breach {
@@ -2037,6 +2084,23 @@ impl SLACalculatorContract {
         );
     }
 
+    fn publish_outage_duration_capped_event(
+        env: &Env,
+        caller: &Address,
+        outage_id: &Symbol,
+        original_duration: u32,
+        capped_duration: u32,
+    ) {
+        env.events().publish(
+            (
+                Symbol::new(env, "OutageDurationCapped"),
+                EVENT_VERSION,
+                caller.clone(),
+            ),
+            (outage_id.clone(), original_duration, capped_duration),
+        );
+    }
+
     // -------------------------------------------------------------------
     // #576 – Role audit trail event logger
     // -------------------------------------------------------------------
@@ -2310,6 +2374,35 @@ impl SLACalculatorContract {
             .instance()
             .get(&RETENTION_LIMIT_KEY)
             .unwrap_or(MAX_HISTORY_SIZE))
+    }
+
+    /// Enforce a maximum single outage duration cap (#671).
+    /// Must be at least 1 minute. Admin only.
+    pub fn set_max_outage_duration(
+        env: Env,
+        caller: Address,
+        limit_minutes: u32,
+    ) -> Result<(), SLAError> {
+        Self::check_version(&env)?;
+        Self::require_admin(&env, &caller)?;
+        if limit_minutes == 0 {
+            return Err(SLAError::InvalidMTTR);
+        }
+        env.storage()
+            .instance()
+            .set(&MAX_OUTAGE_DURATION_KEY, &limit_minutes);
+        Ok(())
+    }
+
+    /// Returns the current maximum outage duration cap in minutes (#671).
+    /// Defaults to DEFAULT_MAX_OUTAGE_DURATION_MINUTES (10,080 = 7 days) if never explicitly set.
+    pub fn get_max_outage_duration(env: Env) -> Result<u32, SLAError> {
+        Self::check_version(&env)?;
+        Ok(env
+            .storage()
+            .instance()
+            .get(&MAX_OUTAGE_DURATION_KEY)
+            .unwrap_or(DEFAULT_MAX_OUTAGE_DURATION_MINUTES))
     }
 
     /// SC-021 – Migration state read helper
@@ -2605,5 +2698,109 @@ mod math_helpers_tests {
         // Zero / negative base → 0
         assert_eq!(apply_multi_site_discount(0, 3), 0);
         assert_eq!(apply_multi_site_discount(-500, 2), 0);
+    }
+}
+
+#[cfg(test)]
+mod outage_cap_tests {
+    use super::*;
+    use soroban_sdk::{
+        symbol_short, testutils::Address as _, testutils::Events as _, Address, Env, IntoVal,
+    };
+
+    fn setup(env: &Env) -> (Address, Address, SLACalculatorContractClient) {
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, SLACalculatorContract);
+        let client = SLACalculatorContractClient::new(env, &contract_id);
+        let admin = Address::generate(env);
+        let operator = Address::generate(env);
+        client.initialize(&admin, &operator);
+        (admin, operator, client)
+    }
+
+    #[test]
+    fn test_outage_duration_capping_and_event() {
+        let env = Env::default();
+        let (admin, operator, client) = setup(&env);
+
+        // Default cap is 10,080 minutes (7 days)
+        assert_eq!(client.get_max_outage_duration(), 10_080);
+
+        // Outage below cap is not capped
+        let res_normal = client.calculate_sla(
+            &operator,
+            &symbol_short!("OUT1"),
+            &symbol_short!("high"),
+            &500,
+        );
+        assert_eq!(res_normal.mttr_minutes, 500);
+
+        // Prolonged outage exceeding 7 days (e.g. 20,000 minutes)
+        let prolonged_duration = 20_000;
+        let res_capped = client.calculate_sla(
+            &operator,
+            &symbol_short!("OUT2"),
+            &symbol_short!("high"),
+            &prolonged_duration,
+        );
+
+        // Verified capped at max duration threshold value
+        assert_eq!(res_capped.mttr_minutes, 10_080);
+        // Penalty is calculated based on 10,080 minutes, not 20,000
+        let cfg = client.get_config(&symbol_short!("high"));
+        let expected_overtime = (10_080 - cfg.threshold_minutes) as i128;
+        let expected_penalty = -expected_overtime * cfg.penalty_per_minute;
+        assert_eq!(res_capped.amount, expected_penalty);
+
+        // Verify OutageDurationCapped event was emitted
+        let events = env.events().all();
+        let mut found_cap_event = false;
+        for i in 0..events.len() {
+            let event = events.get(i).unwrap();
+            let topics = event.0;
+            if topics.len() > 0 {
+                let topic0: Symbol = topics.get(0).unwrap().into_val(&env);
+                if topic0 == Symbol::new(&env, "OutageDurationCapped") {
+                    found_cap_event = true;
+                }
+            }
+        }
+        assert!(found_cap_event);
+    }
+
+    #[test]
+    fn test_configurable_max_duration_via_governance() {
+        let env = Env::default();
+        let (admin, operator, client) = setup(&env);
+        let stranger = Address::generate(&env);
+
+        // Non-admin cannot configure cap limit
+        let res_unauth = client.try_set_max_outage_duration(&stranger, &1_000);
+        assert_eq!(res_unauth.unwrap_err().unwrap(), SLAError::Unauthorized);
+
+        // Cannot set 0
+        let res_zero = client.try_set_max_outage_duration(&admin, &0);
+        assert_eq!(res_zero.unwrap_err().unwrap(), SLAError::InvalidMTTR);
+
+        // Admin updates cap limit to 1,000 minutes
+        client.set_max_outage_duration(&admin, &1_000);
+        assert_eq!(client.get_max_outage_duration(), 1_000);
+
+        // Outage with 1,500 minutes gets capped at 1,000 minutes
+        let res = client.calculate_sla(
+            &operator,
+            &symbol_short!("OUT_CAP"),
+            &symbol_short!("high"),
+            &1_500,
+        );
+        assert_eq!(res.mttr_minutes, 1_000);
+
+        // View mode also respects the configured cap
+        let view_res = client.calculate_sla_view(
+            &symbol_short!("OUT_V"),
+            &symbol_short!("high"),
+            &3_000,
+        );
+        assert_eq!(view_res.mttr_minutes, 1_000);
     }
 }

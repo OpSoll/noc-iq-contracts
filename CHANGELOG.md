@@ -13,6 +13,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - `get_result_schema` — explicit schema descriptor for SLA result encoding (status, payment type, rating symbols)
 - `calculate_sla_view` — read-only simulation of SLA calculation without state mutation or auth requirement
 - `get_config_snapshot` — ordered snapshot of all severity configs with version tag
+- `set_max_outage_duration` / `get_max_outage_duration` — configurable governance cap for single outage durations with event notification (#671)
+- `lookup_penalty_rate_bps` / `set_tier_table` / `propose_tier_table` / `execute_tier_table_proposal` — dynamic tier-based SLA penalty percentage lookup table (#670)
+- `register_service` / `set_grace_period_duration` / `evaluate_outage_penalty_with_grace` — service onboarding grace period penalty exemption handling (#672)
+- `snapshot_monthly_sla` / `get_monthly_sla_snapshot` — immutable monthly historical SLA compliance summary records stored in persistent contract storage (#673)
 
 ### Changed
 - `get_stats` now returns a `SLAStats` struct; callers should use field access rather than tuple destructuring
