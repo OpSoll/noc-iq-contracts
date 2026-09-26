@@ -11,6 +11,9 @@ pub struct SLACalculatorContract;
 #[cfg(test)]
 mod tests;
 
+#[cfg(test)]
+mod batch_downtime_tests;
+
 pub mod adaptive_tuning;
 pub mod batch;
 pub mod coordination_harness;
@@ -344,7 +347,7 @@ pub fn compute_config_version_hash(
     env: &Env,
     configs: &soroban_sdk::Map<Symbol, SLAConfig>,
 ) -> soroban_sdk::BytesN<32> {
-    env.crypto().sha256(&configs.to_xdr(env))
+    env.crypto().sha256(&configs.to_xdr(env)).into()
 }
 
 // -----------------------------------------------------------------------
@@ -960,7 +963,7 @@ impl SLACalculatorContract {
             .instance()
             .get(&CONFIG_KEY)
             .ok_or(SLAError::NotInitialized)?;
-        let version_hash = Self::compute_config_version_hash(&env, &configs)?;
+        let version_hash = Self::compute_config_version_hash_u64(&env, &configs)?;
 
         Ok(SLAConfigSnapshot {
             version: symbol_short!("v1"),
@@ -994,7 +997,7 @@ impl SLACalculatorContract {
             .instance()
             .get(&CONFIG_KEY)
             .ok_or(SLAError::NotInitialized)?;
-        Self::compute_config_version_hash(&env, &configs)
+        Self::compute_config_version_hash_u64(&env, &configs)
     }
 
     /// Returns a deterministic hash of an SLAResult payload using the same
@@ -1363,6 +1366,17 @@ impl SLACalculatorContract {
         SLAError,
     > {
         crate::batch::batch_calculate(&env, &caller, requests)
+    }
+
+    /// Return aggregated downtime and compliance for up to 50 site IDs.
+    ///
+    /// This is a read-only batch endpoint; it does not mutate SLA history.
+    pub fn get_batch_downtime(
+        env: Env,
+        site_ids: soroban_sdk::Vec<Symbol>,
+    ) -> Result<soroban_sdk::Vec<crate::batch::BatchDowntimeResult>, SLAError> {
+        Self::check_version(&env)?;
+        crate::batch::get_batch_downtime(&env, &site_ids)
     }
 
     // -------------------------------------------------------------------
@@ -1834,8 +1848,16 @@ impl SLACalculatorContract {
         Self::canonical_severity_index(severity).is_some()
     }
 
-    /// Shared config lookup that borrows env (avoids consuming it).
+    /// Return the canonical 32-byte config hash bound to persisted SLA results.
     fn compute_config_version_hash(
+        env: &Env,
+        configs: &Map<Symbol, SLAConfig>,
+    ) -> Result<soroban_sdk::BytesN<32>, SLAError> {
+        Ok(crate::compute_config_version_hash(env, configs))
+    }
+
+    /// Return the legacy compact u64 config hash used by backend snapshot APIs.
+    fn compute_config_version_hash_u64(
         _env: &Env,
         configs: &Map<Symbol, SLAConfig>,
     ) -> Result<u64, SLAError> {
@@ -1907,7 +1929,9 @@ impl SLACalculatorContract {
         mix!((result.amount >> 64) as u64);
         mix!(result.payment_type.to_val().get_payload());
         mix!(result.rating.to_val().get_payload());
-        mix!(result.config_version_hash);
+        for byte in result.config_version_hash.to_array().iter() {
+            mix!(*byte);
+        }
         mix!(result.recorded_at);
 
         hash.wrapping_mul(BASE).wrapping_add(0x9e3779b97f4a7c15u64) % MODULUS
@@ -1982,7 +2006,7 @@ impl SLACalculatorContract {
                 result.status.clone(),
                 result.payment_type.clone(),
                 result.amount,
-                result.config_version_hash,
+                result.config_version_hash.clone(),
                 result.recorded_at,
             ),
         );
