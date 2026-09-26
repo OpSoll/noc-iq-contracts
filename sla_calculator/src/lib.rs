@@ -16,6 +16,8 @@ mod batch_downtime_tests;
 
 pub mod adaptive_tuning;
 pub mod batch;
+pub mod breach_escalation;
+pub mod collateral_lock;
 pub mod coordination_harness;
 pub mod cross_contract_safety;
 pub mod dependency_propagation;
