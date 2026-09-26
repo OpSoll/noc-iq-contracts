@@ -15,8 +15,10 @@ pub mod adaptive_tuning;
 pub mod batch;
 pub mod coordination_harness;
 pub mod cross_contract_safety;
+pub mod dependency_propagation;
 pub mod event_correlation;
 mod event_schema;
+pub mod event_ttl_refresh;
 pub mod storage_helpers;
 pub mod version_negotiation;
 
