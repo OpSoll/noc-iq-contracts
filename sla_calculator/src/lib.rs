@@ -20,8 +20,10 @@ pub mod coordination_harness;
 pub mod cross_contract_safety;
 pub mod event_correlation;
 mod event_schema;
+pub mod state_integrity;
 pub mod storage_helpers;
 pub mod version_negotiation;
+pub mod zero_downtime_bonus;
 
 // -----------------------------------------------------------------------
 // Storage keys
