@@ -8,6 +8,11 @@ use crate::{SLAError, ADMIN_KEY};
 const WHITELIST_KEY: Symbol = symbol_short!("WL");
 /// Issue #703: per-operator role assignments for the permission matrix.
 const OPERATOR_ROLES_KEY: Symbol = symbol_short!("OP_ROLE");
+/// Issue #672: Service onboarding registration records.
+const SERVICE_REG_KEY: Symbol = symbol_short!("SVC_REG");
+/// Issue #672: Global configured grace period duration in seconds.
+const GRACE_PERIOD_KEY: Symbol = symbol_short!("GRACE_P");
+const DEFAULT_GRACE_PERIOD_SECONDS: u64 = 14 * 86_400; // 14 days
 
 // -----------------------------------------------------------------------
 // Events
@@ -19,10 +24,23 @@ const EVENT_VERSION: Symbol = symbol_short!("v1");
 /// Issue #703.
 const EVENT_ROLE_ASSIGNED: Symbol = symbol_short!("role_set");
 const EVENT_ROLE_REVOKED: Symbol = symbol_short!("role_rvk");
+/// Issue #672.
+const EVENT_SVC_REG: Symbol = symbol_short!("svc_reg");
+const EVENT_GRACE_EXEMPT: Symbol = symbol_short!("grc_exm");
+const EVENT_GRACE_SET: Symbol = symbol_short!("grc_set");
 
 // -----------------------------------------------------------------------
 // Types
 // -----------------------------------------------------------------------
+
+/// Issue #672: Service onboarding registration record.
+#[soroban_sdk::contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ServiceRegistrationRecord {
+    pub service: Address,
+    pub registered_at: u64,
+    pub grace_period_seconds: u64,
+}
 
 /// Cross-contract whitelist state.
 #[soroban_sdk::contracttype]
@@ -392,6 +410,111 @@ pub fn require_auditor(env: &Env, operator: &Address) -> Result<(), SLAError> {
     require_role(env, operator, OperatorRole::Auditor)
 }
 
+// -----------------------------------------------------------------------
+// Issue #672: Service onboarding grace period
+// -----------------------------------------------------------------------
+
+/// Configure the default onboarding grace period duration (admin only).
+pub fn set_grace_period_duration(
+    env: &Env,
+    caller: &Address,
+    duration_seconds: u64,
+) -> Result<(), SLAError> {
+    require_admin(env, caller)?;
+    env.storage()
+        .instance()
+        .set(&GRACE_PERIOD_KEY, &duration_seconds);
+    env.events()
+        .publish((EVENT_GRACE_SET, EVENT_VERSION, caller), duration_seconds);
+    Ok(())
+}
+
+/// Returns the current onboarding grace period duration in seconds (default 14 days).
+pub fn get_grace_period_duration(env: &Env) -> u64 {
+    env.storage()
+        .instance()
+        .get(&GRACE_PERIOD_KEY)
+        .unwrap_or(DEFAULT_GRACE_PERIOD_SECONDS)
+}
+
+fn load_service_registrations(
+    env: &Env,
+) -> soroban_sdk::Map<Address, ServiceRegistrationRecord> {
+    env.storage()
+        .instance()
+        .get(&SERVICE_REG_KEY)
+        .unwrap_or_else(|| soroban_sdk::Map::new(env))
+}
+
+/// Register a service with an onboarding grace period (admin only).
+/// Stores service registration timestamp in instance storage.
+pub fn register_service(
+    env: &Env,
+    caller: &Address,
+    service: &Address,
+) -> Result<ServiceRegistrationRecord, SLAError> {
+    require_admin(env, caller)?;
+
+    let grace_period_seconds = get_grace_period_duration(env);
+    let registered_at = env.ledger().timestamp();
+    let record = ServiceRegistrationRecord {
+        service: service.clone(),
+        registered_at,
+        grace_period_seconds,
+    };
+
+    let mut map = load_service_registrations(env);
+    map.set(service.clone(), record.clone());
+    env.storage().instance().set(&SERVICE_REG_KEY, &map);
+
+    env.events().publish(
+        (EVENT_SVC_REG, EVENT_VERSION, caller),
+        (service.clone(), registered_at, grace_period_seconds),
+    );
+
+    Ok(record)
+}
+
+/// Returns the registration record for `service`, if any.
+pub fn get_service_registration(
+    env: &Env,
+    service: &Address,
+) -> Option<ServiceRegistrationRecord> {
+    load_service_registrations(env).get(service.clone())
+}
+
+/// Returns true if `service` is currently in its onboarding grace period.
+/// Automatically expires once the ledger timestamp is at or past `registered_at + grace_period_seconds`.
+pub fn is_service_in_grace_period(env: &Env, service: &Address) -> bool {
+    let record = match get_service_registration(env, service) {
+        Some(r) => r,
+        None => return false,
+    };
+
+    let current_time = env.ledger().timestamp();
+    current_time < record.registered_at.saturating_add(record.grace_period_seconds)
+}
+
+/// Evaluates penalty payout for an outage on a service.
+/// Outages during grace period log event data without triggering penalty payouts (returns 0).
+/// When grace period has expired or for unregistered services, returns the original penalty amount.
+pub fn evaluate_outage_penalty_with_grace(
+    env: &Env,
+    service: &Address,
+    outage_id: &Symbol,
+    calculated_penalty: i128,
+) -> i128 {
+    if is_service_in_grace_period(env, service) {
+        env.events().publish(
+            (EVENT_GRACE_EXEMPT, EVENT_VERSION, service.clone()),
+            (outage_id.clone(), calculated_penalty, 0i128),
+        );
+        0
+    } else {
+        calculated_penalty
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -530,6 +653,109 @@ mod tests {
                 require_reporter(&env, &stranger),
                 Err(SLAError::Unauthorized)
             );
+        });
+    }
+
+    // -------------------------------------------------------------------
+    // Issue #672 Tests
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_service_registration_stored_in_instance_storage() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let cid = env.register_contract(None, crate::SLACalculatorContract);
+        let admin = Address::generate(&env);
+        let service = Address::generate(&env);
+
+        env.ledger().set_timestamp(1_000_000);
+
+        env.as_contract(&cid, || {
+            setup(&env, &admin);
+            assert_eq!(get_service_registration(&env, &service), None);
+
+            let record = register_service(&env, &admin, &service).unwrap();
+            assert_eq!(record.service, service);
+            assert_eq!(record.registered_at, 1_000_000);
+            assert_eq!(record.grace_period_seconds, 14 * 86_400);
+
+            let stored = get_service_registration(&env, &service).unwrap();
+            assert_eq!(stored.registered_at, 1_000_000);
+            assert_eq!(stored.grace_period_seconds, 14 * 86_400);
+        });
+    }
+
+    #[test]
+    fn test_penalty_exemption_and_automatic_expiration_during_grace_period() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let cid = env.register_contract(None, crate::SLACalculatorContract);
+        let admin = Address::generate(&env);
+        let service = Address::generate(&env);
+        let outage_id = symbol_short!("OUT1");
+
+        let start_time = 1_000_000;
+        env.ledger().set_timestamp(start_time);
+
+        env.as_contract(&cid, || {
+            setup(&env, &admin);
+            register_service(&env, &admin, &service).unwrap();
+
+            // During grace period (e.g. day 5: 5 * 86,400 seconds later)
+            env.ledger().set_timestamp(start_time + 5 * 86_400);
+            assert!(is_service_in_grace_period(&env, &service));
+
+            // Standard penalty is 500, but in grace period it must evaluate to 0 (exempt)
+            let penalty = evaluate_outage_penalty_with_grace(&env, &service, &outage_id, 500);
+            assert_eq!(penalty, 0);
+
+            // Exactly at expiration (14 days = 14 * 86,400 seconds)
+            env.ledger().set_timestamp(start_time + 14 * 86_400);
+            assert!(!is_service_in_grace_period(&env, &service));
+
+            // Past grace period (e.g. day 15) -> full penalty applies
+            env.ledger().set_timestamp(start_time + 15 * 86_400);
+            assert!(!is_service_in_grace_period(&env, &service));
+
+            let penalty_after = evaluate_outage_penalty_with_grace(&env, &service, &outage_id, 500);
+            assert_eq!(penalty_after, 500);
+        });
+    }
+
+    #[test]
+    fn test_custom_grace_period_configuration() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let cid = env.register_contract(None, crate::SLACalculatorContract);
+        let admin = Address::generate(&env);
+        let stranger = Address::generate(&env);
+        let service = Address::generate(&env);
+
+        env.ledger().set_timestamp(1_000_000);
+
+        env.as_contract(&cid, || {
+            setup(&env, &admin);
+            // Default is 14 days
+            assert_eq!(get_grace_period_duration(&env), 14 * 86_400);
+
+            // Stranger cannot set duration
+            let err = set_grace_period_duration(&env, &stranger, 7 * 86_400);
+            assert_eq!(err, Err(SLAError::Unauthorized));
+
+            // Admin updates to 7 days
+            set_grace_period_duration(&env, &admin, 7 * 86_400).unwrap();
+            assert_eq!(get_grace_period_duration(&env), 7 * 86_400);
+
+            let record = register_service(&env, &admin, &service).unwrap();
+            assert_eq!(record.grace_period_seconds, 7 * 86_400);
+
+            // Day 6: in grace period
+            env.ledger().set_timestamp(1_000_000 + 6 * 86_400);
+            assert!(is_service_in_grace_period(&env, &service));
+
+            // Day 8: expired
+            env.ledger().set_timestamp(1_000_000 + 8 * 86_400);
+            assert!(!is_service_in_grace_period(&env, &service));
         });
     }
 }
