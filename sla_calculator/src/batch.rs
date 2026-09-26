@@ -5,7 +5,7 @@ use crate::{SLAConfig, SLAError, SLAResult, CONFIG_KEY, OPERATOR_KEY};
 // -----------------------------------------------------------------------
 // Events (#540)
 // -----------------------------------------------------------------------
-const EVENT_BATCH_CALC: Symbol = symbol_short!("batch_calc");
+const EVENT_BATCH_CALC: Symbol = symbol_short!("btch_calc");
 const EVENT_VERSION: Symbol = symbol_short!("v1");
 
 // -----------------------------------------------------------------------
@@ -71,7 +71,7 @@ pub struct BatchSummary {
 /// BatchSummary with overall results and individual item outcomes.
 ///
 /// # Events
-/// Emits `batch_calc` (#540) with payload
+/// Emits `btch_calc` (#540) with payload
 /// `(total_items, met_count, violation_count, total_penalty)`.
 pub fn batch_calculate(
     env: &Env,
@@ -165,7 +165,7 @@ pub fn batch_calculate(
     };
 
     // #540 – Emit a single batch_calculated summary event.
-    // topics: (batch_calc, v1, caller)
+    // topics: (btch_calc, v1, caller)
     // data:   (total_items, met_count, violation_count, total_penalty)
     // total_penalty is the absolute (non-negative) sum of penalty amounts.
     let total_items = requests.len();
@@ -252,6 +252,90 @@ pub(crate) fn process_single(
             recorded_at: env.ledger().timestamp(),
         })
     }
+}
+
+/// Aggregated downtime and compliance for a set of site IDs.
+///
+/// In this contract, the persisted SLA history uses `outage_id` as the
+/// identifier for an SLA downtime record. The batch getter treats each
+/// requested site ID as that persisted identifier and aggregates every
+/// matching history entry. This keeps the read path side-effect free and
+/// avoids one contract read per requested site.
+///
+/// A site with no matching history is reported with zero downtime and an
+/// `unknown` compliance status. A site with matching entries is `compliant`
+/// only when every matching entry met its SLA threshold.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BatchDowntimeResult {
+    pub site_id: Symbol,
+    pub total_downtime: u64,
+    pub compliance_status: Symbol,
+}
+
+/// Get aggregated downtime and compliance for up to 50 site IDs.
+pub fn get_batch_downtime(
+    env: &Env,
+    site_ids: &soroban_sdk::Vec<Symbol>,
+) -> Result<soroban_sdk::Vec<BatchDowntimeResult>, SLAError> {
+    if site_ids.len() > get_batch_limit() {
+        return Err(SLAError::ThresholdOutOfBounds);
+    }
+
+    let history: soroban_sdk::Vec<SLAResult> = env
+        .storage()
+        .instance()
+        .get(&crate::HISTORY_KEY)
+        .unwrap_or_else(|| soroban_sdk::Vec::new(env));
+
+    // Aggregate the retained history once, then answer the requested IDs from
+    // in-memory maps. This keeps the getter O(history + batch) rather than
+    // scanning the full history once for every requested site.
+    let mut downtime_by_site = soroban_sdk::Map::new(env);
+    let mut compliant_by_site = soroban_sdk::Map::new(env);
+
+    for i in 0..history.len() {
+        let entry = history.get(i).unwrap();
+        let current = downtime_by_site
+            .get(entry.outage_id.clone())
+            .unwrap_or(0u64);
+        downtime_by_site.set(
+            entry.outage_id.clone(),
+            current.saturating_add(entry.mttr_minutes as u64),
+        );
+
+        let previous_compliance = compliant_by_site
+            .get(entry.outage_id.clone())
+            .unwrap_or(true);
+        compliant_by_site.set(
+            entry.outage_id,
+            previous_compliance && entry.status == symbol_short!("met"),
+        );
+    }
+
+    let mut results = soroban_sdk::Vec::new(env);
+
+    for i in 0..site_ids.len() {
+        let site_id = site_ids.get(i).unwrap();
+
+        let total_downtime = downtime_by_site
+            .get(site_id.clone())
+            .unwrap_or(0u64);
+
+        let compliance_status = match compliant_by_site.get(site_id.clone()) {
+            None => symbol_short!("unknown"),
+            Some(true) => symbol_short!("compliant"),
+            Some(false) => symbol_short!("noncomp"),
+        };
+
+        results.push_back(BatchDowntimeResult {
+            site_id,
+            total_downtime,
+            compliance_status,
+        });
+    }
+
+    Ok(results)
 }
 
 /// Get batch size limit (maximum items per batch).

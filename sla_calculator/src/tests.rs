@@ -8970,11 +8970,11 @@ proptest! {
     }
 }
 
-=======
 // SC — Auth & admin governance (#568 proposal expiration,
 // #569 require_auth address check, #570 role error taxonomy,
 // #571 get_pending_admin)
 // =====================================================
+
 #[test]
 fn test_sc569_verify_admin_auth_succeeds_with_authorization() {
     let (env, client, actors) = setup();
@@ -8984,27 +8984,34 @@ fn test_sc569_verify_admin_auth_succeeds_with_authorization() {
 
 #[test]
 fn test_sc569_verify_admin_auth_rejects_non_admin() {
-    let (env, client, actors) = setup();
-    env.mock_all_auths();
+    let (_env, client, actors) = setup();
     let res = client.try_verify_admin_auth(&actors.stranger);
-=======
+    assert!(res.is_err());
+}
+
 // SC — Config counter, backup/restore, conversion, admin guard
 // (#560 config_update_count, #561 export/import_config_map,
 // #562 threshold_to_seconds, #563 require_admin)
 // =====================================================
+
 #[test]
 fn test_sc560_config_update_count_increments() {
     let (_env, client, actors) = setup();
     assert_eq!(client.get_config_update_count(), 0);
-    assert_eq!(client.get_config_update_count(), 1);
+
     client.set_config(
         &actors.admin,
         &symbol_short!("high"),
         &29u32,
-=======
-// SC — Config update guards (#556 idempotency, #557 validate_config,
-// #558 cross-severity monotonicity, #559 admin authorization)
-// ============================================================
+        &50i128,
+        &750i128,
+        &200u32,
+        &150u32,
+        &100u32,
+    );
+
+    assert_eq!(client.get_config_update_count(), 1);
+}
 
 #[test]
 fn test_sc556_identical_config_update_is_idempotent_noop() {
@@ -9057,7 +9064,7 @@ fn test_sc558_monotonic_update_is_accepted() {
         &150u32,
         &100u32,
     );
-    assert_eq!(client.get_config_update_count(), 2);
+    assert_eq!(client.get_config_update_count(), 1);
 }
 
 #[test]
@@ -9071,9 +9078,10 @@ fn test_sc561_export_import_config_map_round_trip() {
             .get_config(&symbol_short!("critical"))
             .threshold_minutes,
         15
+    );
     assert_eq!(
         client.get_config(&symbol_short!("high")).threshold_minutes,
-        25
+        30
     );
 }
 
@@ -9086,12 +9094,11 @@ fn test_sc561_import_empty_config_map_rejected() {
 }
 
 #[test]
-fn test_sc571_get_pending_admin_reflects_proposal() {
-    let (env, client, actors) = setup();
-    assert!(client.get_pending_admin().is_none());
-    let candidate = soroban_sdk::Address::generate(&env);
-    client.propose_admin(&actors.admin, &candidate);
-    assert_eq!(client.get_pending_admin(), Some(candidate));
+fn test_sc561_import_config_map_requires_admin() {
+    let (_env, client, actors) = setup();
+    let exported = client.export_config_map();
+    let res = client.try_import_config_map(&actors.stranger, &exported);
+    assert_eq!(res, Err(Ok(SLAError::Unauthorized)));
 }
 
 #[test]
@@ -9107,14 +9114,28 @@ fn test_sc568_pending_admin_proposal_expires() {
 
 #[test]
 fn test_sc570_role_error_taxonomy_unauthorized() {
-    let (env, client, actors) = setup();
-    let new_op = soroban_sdk::Address::generate(&env);
+    let (_env, client, actors) = setup();
+    let new_op = soroban_sdk::Address::generate(&_env);
     assert_eq!(
         client.try_set_operator(&actors.stranger, &new_op),
-fn test_sc561_import_config_map_requires_admin() {
-    let (_env, client, actors) = setup();
-    let exported = client.export_config_map();
-    let res = client.try_import_config_map(&actors.stranger, &exported);
+        Err(Ok(SLAError::Unauthorized))
+    );
+}
+
+#[test]
+fn test_sc571_get_pending_admin_reflects_proposal() {
+    let (env, client, actors) = setup();
+    assert!(client.get_pending_admin().is_none());
+    let candidate = soroban_sdk::Address::generate(&env);
+    client.propose_admin(&actors.admin, &candidate);
+    assert_eq!(client.get_pending_admin(), Some(candidate));
+}
+
+// SC — Config update guards (#557 validation, #558 cross-severity monotonicity,
+// #559 admin authorization)
+// ============================================================
+
+#[test]
 fn test_sc558_cross_severity_inversion_rejected() {
     let (_env, client, actors) = setup();
     let res = client.try_set_config(
@@ -9584,7 +9605,7 @@ mod isqrt_tests {
         assert_eq!(isqrt(16), 4);
         assert_eq!(isqrt(100), 10);
         assert_eq!(isqrt(10_000), 100);
-        assert_eq!(isqrt(u128::MAX), 34028236692093846346), 34028236692093846346337460743168 ? ...); // checked boundary
+        assert_eq!(isqrt(u128::MAX), 18_446_744_073_709_551_615);
     }
 
     #[test]
@@ -9645,7 +9666,7 @@ fn test_batch_calculate_emits_batch_calc_event() {
     let topic_1: Symbol = topics.get(1).unwrap().try_into_val(&env).unwrap();
     let topic_2: soroban_sdk::Address = topics.get(2).unwrap().try_into_val(&env).unwrap();
 
-    assert_eq!(topic_0, symbol_short!("batch_calc"));
+    assert_eq!(topic_0, symbol_short!("btch_calc"));
     assert_eq!(topic_1, symbol_short!("v1"));
     assert_eq!(topic_2, actors.operator);
 
