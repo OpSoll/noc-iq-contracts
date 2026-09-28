@@ -8383,6 +8383,8 @@ fn test_error_code_discriminants_match_expected_values() {
     assert_eq!(SLAError::PenaltyOutOfBounds as u32, 20);
     assert_eq!(SLAError::RewardOutOfBounds as u32, 21);
     assert_eq!(SLAError::InvalidMonth as u32, 22);
+    assert_eq!(SLAError::InvalidTimestampSequence as u32, 23);
+    assert_eq!(SLAError::DivisionByZero as u32, 24);
 }
 // ============================================================
 
@@ -8563,6 +8565,8 @@ fn test_sla_error_converts_all_variants_to_contract_error() {
         (SLAError::PenaltyOutOfBounds as u32, 20),
         (SLAError::RewardOutOfBounds as u32, 21),
         (SLAError::InvalidMonth as u32, 22),
+        (SLAError::InvalidTimestampSequence as u32, 23),
+        (SLAError::DivisionByZero as u32, 24),
     ];
 
     for (variant_code, expected_code) in all_pass {
@@ -8589,6 +8593,8 @@ fn test_sla_error_converts_all_variants_to_contract_error() {
             20 => SLAError::PenaltyOutOfBounds,
             21 => SLAError::RewardOutOfBounds,
             22 => SLAError::InvalidMonth,
+            23 => SLAError::InvalidTimestampSequence,
+            24 => SLAError::DivisionByZero,
             _ => panic!("Unexpected variant code"),
         };
         let err: Error = sla_err.into();

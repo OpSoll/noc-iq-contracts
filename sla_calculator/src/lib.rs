@@ -25,7 +25,7 @@ pub mod dependency_propagation;
 pub mod event_correlation;
 pub mod event_log_compaction;
 pub mod event_payload_guard;
-mod event_schema;
+pub mod event_schema;
 pub mod event_ttl_refresh;
 pub mod force_majeure;
 pub mod history_snapshot;
@@ -34,6 +34,7 @@ pub mod resolution_delay;
 pub mod state_integrity;
 pub mod storage_helpers;
 pub mod threshold_config;
+pub mod trend;
 pub mod version_negotiation;
 pub mod whitelist;
 pub mod zero_downtime_bonus;
@@ -147,6 +148,8 @@ pub enum SLAError {
     PenaltyOutOfBounds = 20,
     RewardOutOfBounds = 21,
     InvalidMonth = 22,
+    InvalidTimestampSequence = 23, // #664 – out-of-order outage ingestion
+    DivisionByZero = 24,           // #663 – zero-denominator SLA precision math
 }
 
 // -----------------------------------------------------------------------
@@ -1043,7 +1046,7 @@ impl SLACalculatorContract {
 
         // Emit in numeric order for deterministic consumption
         // All descriptions must be <= 32 bytes (Soroban Symbol constraint)
-        let entries: [(u32, &str, &str); 22] = [
+        let entries: [(u32, &str, &str); 24] = [
             (1, "AlreadyInitialized", "Contract already initialized"),
             (2, "NotInitialized", "Contract not yet initialized"),
             (3, "Unauthorized", "Caller lacks required role"),
@@ -1070,6 +1073,8 @@ impl SLACalculatorContract {
             (20, "PenaltyOutOfBounds", "Penalty out of bounds"),
             (21, "RewardOutOfBounds", "Reward out of bounds"),
             (22, "InvalidMonth", "Month out of range"),
+            (23, "InvalidTimestampSequence", "Timestamps out of order"),
+            (24, "DivisionByZero", "Division by zero attempted"),
         ];
 
         for (code, label, description) in entries {
@@ -2654,6 +2659,100 @@ pub fn apply_multi_site_discount(base_penalty: i128, affected_site_count: u32) -
     base_penalty.saturating_mul(factor).saturating_div(10_000)
 }
 
+// -----------------------------------------------------------------------
+// #663 – Sub-minute SLA calculation precision helper
+// -----------------------------------------------------------------------
+
+/// Whole basis points that represent 100% availability.
+pub const BPS_DENOMINATOR: u32 = 10_000;
+
+/// Milliseconds in one second — the fixed-point unit used by
+/// [`SubMinutePrecision`].
+pub const MILLIS_PER_SECOND: u64 = 1_000;
+
+/// Milliseconds in one minute.
+pub const MILLIS_PER_MINUTE: u64 = 60 * MILLIS_PER_SECOND;
+
+/// Scale factor that lifts a basis point to three decimal places
+/// (`10_000` bps × `1_000` == 100%).
+pub const MILLI_BPS_SCALE: u64 = 1_000;
+
+/// Sub-minute fixed-point helpers for SLA availability math.
+///
+/// Whole-minute MTTR values truncate fractional seconds, which loses precision
+/// when an outage only lasts a few seconds. These helpers keep millisecond
+/// precision (three decimal places of a percentage point) while widening every
+/// intermediate product to `u128`, so multiplying two large durations can never
+/// wrap the accumulator.
+pub struct SubMinutePrecision;
+
+impl SubMinutePrecision {
+    /// Availability of a fully available window: 100%, in milli-basis-points.
+    pub const FULL_AVAILABILITY_MILLI_BPS: u64 = BPS_DENOMINATOR as u64 * MILLI_BPS_SCALE;
+
+    /// Availability in milli-basis-points (`10_000_000` == 100%), i.e. three
+    /// decimal places of a percentage point: `99.999%` → `9_999_900`.
+    ///
+    /// `uptime_millis` is clamped to `window_millis` so availability can never
+    /// exceed 100%. Returns [`SLAError::DivisionByZero`] when the observation
+    /// window is zero instead of panicking.
+    pub fn availability_milli_bps(uptime_millis: u64, window_millis: u64) -> Result<u64, SLAError> {
+        if window_millis == 0 {
+            return Err(SLAError::DivisionByZero);
+        }
+
+        // Widening to u128 before multiplying keeps the intermediate product
+        // overflow-free even for durations close to u64::MAX.
+        let numerator = (uptime_millis.min(window_millis) as u128)
+            * (BPS_DENOMINATOR as u128)
+            * (MILLI_BPS_SCALE as u128);
+
+        Ok((numerator / window_millis as u128) as u64)
+    }
+
+    /// Availability in milli-basis-points for a window during which
+    /// `downtime_millis` were spent unavailable.
+    pub fn downtime_availability_milli_bps(
+        downtime_millis: u64,
+        window_millis: u64,
+    ) -> Result<u64, SLAError> {
+        let downtime = downtime_millis.min(window_millis);
+        Self::availability_milli_bps(window_millis - downtime, window_millis)
+    }
+
+    /// Returns `true` when availability meets or exceeds `threshold_milli_bps`.
+    ///
+    /// Milli-basis-points allow thresholds such as `99.999%` (`9_999_900`) that
+    /// cannot be expressed with whole basis points.
+    pub fn meets_threshold_milli_bps(
+        uptime_millis: u64,
+        window_millis: u64,
+        threshold_milli_bps: u64,
+    ) -> Result<bool, SLAError> {
+        Ok(Self::availability_milli_bps(uptime_millis, window_millis)? >= threshold_milli_bps)
+    }
+
+    /// Converts whole minutes to milliseconds, saturating at [`u64::MAX`]
+    /// rather than overflowing.
+    pub fn minutes_to_millis(minutes: u64) -> u64 {
+        minutes.saturating_mul(MILLIS_PER_MINUTE)
+    }
+
+    /// Converts milliseconds to whole minutes, rounding *up* so a sub-minute
+    /// outage is never reported as zero minutes of downtime.
+    pub fn millis_to_minutes_ceil(millis: u64) -> u32 {
+        u32::try_from(millis.div_ceil(MILLIS_PER_MINUTE)).unwrap_or(u32::MAX)
+    }
+
+    /// Truncates a milli-basis-point value to whole basis points.
+    ///
+    /// Truncation (rather than rounding) keeps availability figures
+    /// conservative: `99.999%` (`9_999_900`) reports as `9_999` bps.
+    pub fn milli_bps_to_bps(milli_bps: u64) -> u32 {
+        (milli_bps / MILLI_BPS_SCALE) as u32
+    }
+}
+
 #[cfg(test)]
 mod math_helpers_tests {
     use super::*;
@@ -2698,6 +2797,113 @@ mod math_helpers_tests {
         // Zero / negative base → 0
         assert_eq!(apply_multi_site_discount(0, 3), 0);
         assert_eq!(apply_multi_site_discount(-500, 2), 0);
+    }
+}
+
+#[cfg(test)]
+mod sub_minute_precision_tests {
+    use super::*;
+
+    const ONE_DAY_MILLIS: u64 = 24 * 60 * 60 * 1_000;
+
+    #[test]
+    fn minutes_convert_to_millis_without_overflow() {
+        assert_eq!(SubMinutePrecision::minutes_to_millis(0), 0);
+        assert_eq!(SubMinutePrecision::minutes_to_millis(1), 60_000);
+        assert_eq!(SubMinutePrecision::minutes_to_millis(7), 420_000);
+        // Saturates instead of wrapping for an absurd duration.
+        assert_eq!(SubMinutePrecision::minutes_to_millis(u64::MAX), u64::MAX);
+    }
+
+    #[test]
+    fn sub_minute_durations_round_up_to_a_full_minute() {
+        assert_eq!(SubMinutePrecision::millis_to_minutes_ceil(0), 0);
+        assert_eq!(SubMinutePrecision::millis_to_minutes_ceil(1), 1);
+        assert_eq!(SubMinutePrecision::millis_to_minutes_ceil(59_999), 1);
+        assert_eq!(SubMinutePrecision::millis_to_minutes_ceil(60_000), 1);
+        assert_eq!(SubMinutePrecision::millis_to_minutes_ceil(60_001), 2);
+        assert_eq!(
+            SubMinutePrecision::millis_to_minutes_ceil(u64::MAX),
+            u32::MAX
+        );
+    }
+
+    #[test]
+    fn availability_preserves_three_decimal_places() {
+        // 99.999% uptime over one day == 864 ms of downtime.
+        let milli_bps =
+            SubMinutePrecision::downtime_availability_milli_bps(864, ONE_DAY_MILLIS).unwrap();
+        assert_eq!(milli_bps, 9_999_900);
+        // Whole-basis-point conversion truncates rather than overstating.
+        assert_eq!(SubMinutePrecision::milli_bps_to_bps(milli_bps), 9_999);
+    }
+
+    #[test]
+    fn rounding_is_stable_around_the_99_999_threshold() {
+        let threshold = 9_999_900; // 99.999%
+        let just_inside = SubMinutePrecision::meets_threshold_milli_bps(
+            ONE_DAY_MILLIS - 864,
+            ONE_DAY_MILLIS,
+            threshold,
+        )
+        .unwrap();
+        let just_outside = SubMinutePrecision::meets_threshold_milli_bps(
+            ONE_DAY_MILLIS - 865,
+            ONE_DAY_MILLIS,
+            threshold,
+        )
+        .unwrap();
+
+        assert!(just_inside, "99.999% must meet the 99.999% threshold");
+        assert!(
+            !just_outside,
+            "99.998999...% must fall below the 99.999% threshold"
+        );
+        // The truncated whole-bps view of 99.999% is 99.99%, never 100%.
+        assert_eq!(SubMinutePrecision::milli_bps_to_bps(threshold), 9_999);
+    }
+
+    #[test]
+    fn large_durations_cannot_overflow_the_accumulator() {
+        // Full uptime over the largest possible window is still exactly 100%.
+        let milli_bps = SubMinutePrecision::availability_milli_bps(u64::MAX, u64::MAX).unwrap();
+        assert_eq!(milli_bps, SubMinutePrecision::FULL_AVAILABILITY_MILLI_BPS);
+    }
+
+    #[test]
+    fn uptime_is_clamped_to_the_window() {
+        let milli_bps = SubMinutePrecision::availability_milli_bps(500, 100).unwrap();
+        assert_eq!(milli_bps, SubMinutePrecision::FULL_AVAILABILITY_MILLI_BPS);
+    }
+
+    #[test]
+    fn full_downtime_reports_zero_availability() {
+        assert_eq!(
+            SubMinutePrecision::downtime_availability_milli_bps(ONE_DAY_MILLIS, ONE_DAY_MILLIS)
+                .unwrap(),
+            0
+        );
+        // Downtime greater than the window is clamped.
+        assert_eq!(
+            SubMinutePrecision::downtime_availability_milli_bps(u64::MAX, ONE_DAY_MILLIS).unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn zero_window_returns_a_typed_error() {
+        assert_eq!(
+            SubMinutePrecision::availability_milli_bps(10, 0),
+            Err(SLAError::DivisionByZero)
+        );
+        assert_eq!(
+            SubMinutePrecision::downtime_availability_milli_bps(10, 0),
+            Err(SLAError::DivisionByZero)
+        );
+        assert_eq!(
+            SubMinutePrecision::meets_threshold_milli_bps(10, 0, 9_999_900),
+            Err(SLAError::DivisionByZero)
+        );
     }
 }
 
