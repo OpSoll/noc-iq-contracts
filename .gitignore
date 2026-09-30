@@ -1,5 +1,8 @@
 # Rust
 target/
+# Local toolchain installed for verification (not part of the repo)
+.cargo/
+.rustup/
 # Note: Cargo.lock is intentionally tracked for WASM reproducibility.
 # See: https://doc.rust-lang.org/cargo/faq.html#why-have-cargolock-in-version-control
 

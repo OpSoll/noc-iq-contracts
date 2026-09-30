@@ -97,7 +97,9 @@
 //! end) are NOT considered breaking and do not require a version bump as long
 //! as old consumers ignore unrecognised trailing fields.
 
-use soroban_sdk::{symbol_short, Symbol};
+use soroban_sdk::{contracttype, symbol_short, Env, Symbol};
+
+use crate::SLAError;
 
 /// Canonical event version symbol used by all events.
 #[allow(dead_code)]
@@ -145,12 +147,81 @@ pub fn current_event_version() -> Symbol {
     EVENT_VERSION
 }
 
+// -----------------------------------------------------------------------
+// Issue #664 – non-monotonic timestamp detection in outage ingestion
+// -----------------------------------------------------------------------
+
+/// Instance-storage key holding the end timestamp of the newest event that was
+/// successfully ingested — the monotonic high-water mark.
+const LAST_EVENT_END_KEY: Symbol = symbol_short!("LASTEND");
+
+/// A raw outage event submitted by the ingest pipeline.
+///
+/// `start_timestamp` / `end_timestamp` are ledger timestamps in seconds.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OutageEvent {
+    pub outage_id: Symbol,
+    pub start_timestamp: u64,
+    pub end_timestamp: u64,
+}
+
+/// Pure timestamp-sequence guard.
+///
+/// Rejects a payload whose `start_timestamp` predates the last accepted event's
+/// end timestamp, so out-of-order events cannot corrupt availability metrics.
+/// Identical timestamps are permitted so several sites that fail (or recover)
+/// in the same ledger can be ingested together.
+///
+/// A payload that ends before it starts is malformed and rejected as well.
+/// Both cases surface as [`SLAError::InvalidTimestampSequence`].
+pub fn validate_timestamp_sequence(
+    start_timestamp: u64,
+    end_timestamp: u64,
+    last_end_timestamp: Option<u64>,
+) -> Result<(), SLAError> {
+    if end_timestamp < start_timestamp {
+        return Err(SLAError::InvalidTimestampSequence);
+    }
+
+    if let Some(last_end) = last_end_timestamp {
+        if start_timestamp < last_end {
+            return Err(SLAError::InvalidTimestampSequence);
+        }
+    }
+
+    Ok(())
+}
+
+/// Returns the stored monotonic high-water mark, if any event has been ingested.
+pub fn last_event_end_timestamp(env: &Env) -> Option<u64> {
+    env.storage().instance().get(&LAST_EVENT_END_KEY)
+}
+
+/// Validates and persists an ingested outage event.
+///
+/// Out-of-order payloads are rejected with
+/// [`SLAError::InvalidTimestampSequence`] and leave the high-water mark
+/// untouched. Accepted events advance the mark to the newest end timestamp
+/// observed, keeping the sequence check monotonic across calls.
+pub fn ingest_outage_event(env: &Env, event: &OutageEvent) -> Result<(), SLAError> {
+    let last_end = last_event_end_timestamp(env);
+    validate_timestamp_sequence(event.start_timestamp, event.end_timestamp, last_end)?;
+
+    // Sequence validation guarantees `end_timestamp >= start_timestamp >= last_end`,
+    // so the high-water mark can only ever move forward.
+    env.storage()
+        .instance()
+        .set(&LAST_EVENT_END_KEY, &event.end_timestamp);
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     extern crate alloc;
     use super::*;
     use alloc::format;
-    use soroban_sdk::Env;
 
     #[test]
     fn test_event_version_is_stable() {
@@ -194,5 +265,96 @@ mod tests {
     fn test_event_version_is_short_enough() {
         let version_str = format!("{:?}", current_event_version());
         assert!(version_str.len() <= 32, "Version symbol too long");
+    }
+}
+
+#[cfg(test)]
+mod timestamp_sequence_tests {
+    use super::*;
+    use crate::SLACalculatorContract;
+
+    fn with_contract<R>(env: &Env, f: impl FnOnce() -> R) -> R {
+        let contract_id = env.register_contract(None, SLACalculatorContract);
+        env.as_contract(&contract_id, f)
+    }
+
+    fn event(env: &Env, outage_id: &str, start_timestamp: u64, end_timestamp: u64) -> OutageEvent {
+        OutageEvent {
+            outage_id: Symbol::new(env, outage_id),
+            start_timestamp,
+            end_timestamp,
+        }
+    }
+
+    #[test]
+    fn the_first_event_has_no_predecessor() {
+        assert_eq!(validate_timestamp_sequence(10, 20, None), Ok(()));
+    }
+
+    #[test]
+    fn an_out_of_order_start_is_rejected() {
+        assert_eq!(
+            validate_timestamp_sequence(90, 150, Some(100)),
+            Err(SLAError::InvalidTimestampSequence)
+        );
+    }
+
+    #[test]
+    fn identical_timestamps_are_allowed_for_simultaneous_sites() {
+        // Two sites fail and recover in the same ledger.
+        assert_eq!(validate_timestamp_sequence(100, 100, Some(100)), Ok(()));
+        // A site recovering in the same ledger another one failed.
+        assert_eq!(validate_timestamp_sequence(100, 250, Some(100)), Ok(()));
+    }
+
+    #[test]
+    fn an_event_that_ends_before_it_starts_is_rejected() {
+        assert_eq!(
+            validate_timestamp_sequence(200, 100, None),
+            Err(SLAError::InvalidTimestampSequence)
+        );
+        assert_eq!(
+            validate_timestamp_sequence(200, 100, Some(50)),
+            Err(SLAError::InvalidTimestampSequence)
+        );
+    }
+
+    #[test]
+    fn a_later_start_is_accepted() {
+        assert_eq!(validate_timestamp_sequence(500, 600, Some(400)), Ok(()));
+    }
+
+    #[test]
+    fn ingestion_advances_the_high_water_mark() {
+        let env = Env::default();
+        with_contract(&env, || {
+            assert_eq!(last_event_end_timestamp(&env), None);
+
+            ingest_outage_event(&env, &event(&env, "out1", 100, 200)).unwrap();
+            assert_eq!(last_event_end_timestamp(&env), Some(200));
+
+            // In-order follow-up is accepted.
+            ingest_outage_event(&env, &event(&env, "out2", 200, 260)).unwrap();
+            assert_eq!(last_event_end_timestamp(&env), Some(260));
+
+            // An out-of-order event is rejected...
+            assert_eq!(
+                ingest_outage_event(&env, &event(&env, "out3", 150, 300)),
+                Err(SLAError::InvalidTimestampSequence)
+            );
+            // ...and the rejected payload must not move the high-water mark.
+            assert_eq!(last_event_end_timestamp(&env), Some(260));
+        });
+    }
+
+    #[test]
+    fn simultaneous_multi_site_events_are_ingested_together() {
+        let env = Env::default();
+        with_contract(&env, || {
+            // Two sites fail in the same ledger, then both recover together.
+            ingest_outage_event(&env, &event(&env, "site_a", 1_000, 2_000)).unwrap();
+            ingest_outage_event(&env, &event(&env, "site_b", 2_000, 2_000)).unwrap();
+            assert_eq!(last_event_end_timestamp(&env), Some(2_000));
+        });
     }
 }
