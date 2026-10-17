@@ -1,6 +1,4 @@
-#![no_std]
-
-use soroban_sdk::{symbol_short, Env, Symbol};
+use soroban_sdk::{symbol_short, xdr::ToXdr, BytesN, Env, Symbol};
 
 use crate::{
     SLAConfig, SLAResult, SLAStats, SLAConfigSnapshot, SLAConfigEntry,
@@ -169,6 +167,14 @@ pub fn export_snapshot(env: &Env) -> Result<ContractSnapshot, SLAError> {
     })
 }
 
+/// SHA-256 checksum of a snapshot's canonical XDR encoding.
+///
+/// Lets operators verify that a snapshot restored elsewhere is byte-for-byte
+/// the one that was exported. Any change to any field changes the checksum.
+pub fn snapshot_checksum(env: &Env, snapshot: &ContractSnapshot) -> BytesN<32> {
+    env.crypto().sha256(&snapshot.clone().to_xdr(env)).to_bytes()
+}
+
 /// Get snapshot metadata without exporting full state.
 ///
 /// Lightweight query for monitoring and health checks.
@@ -275,4 +281,75 @@ pub fn get_state_summary(env: &Env) -> Result<soroban_sdk::Map<Symbol, soroban_s
     );
 
     Ok(summary)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{SLACalculatorContract, SLACalculatorContractClient};
+    use soroban_sdk::{testutils::Address as _, Address};
+
+    fn setup() -> (Env, Address, Address) {
+        let env = Env::default();
+        env.mock_all_auths();
+        let id = env.register_contract(None, SLACalculatorContract);
+        let admin = Address::generate(&env);
+        let operator = Address::generate(&env);
+        SLACalculatorContractClient::new(&env, &id).initialize(&admin, &operator);
+        (env, id, admin)
+    }
+
+    #[test]
+    fn test_snapshot_round_trips_admin_operator_and_config() {
+        let (env, id, admin) = setup();
+        env.as_contract(&id, || {
+            let snap = export_snapshot(&env).unwrap();
+            assert_eq!(snap.admin, admin);
+            assert!(!snap.is_paused);
+            assert_eq!(snap.metadata.history_count, snap.history.len());
+            assert_eq!(snap.metadata.config_count, snap.config_snapshot.entries.len());
+            // A freshly exported snapshot is always importable back.
+            assert_eq!(validate_snapshot_import(&env, &snap), Ok(()));
+        });
+    }
+
+    #[test]
+    fn test_snapshot_export_is_idempotent() {
+        let (env, id, _admin) = setup();
+        env.as_contract(&id, || {
+            let first = export_snapshot(&env).unwrap();
+            let second = export_snapshot(&env).unwrap();
+            assert_eq!(snapshot_checksum(&env, &first), snapshot_checksum(&env, &second));
+        });
+    }
+
+    #[test]
+    fn test_checksum_changes_when_state_changes() {
+        let (env, id, _admin) = setup();
+        env.as_contract(&id, || {
+            let before = snapshot_checksum(&env, &export_snapshot(&env).unwrap());
+            env.storage().instance().set(&PAUSED_KEY, &true);
+            let after = snapshot_checksum(&env, &export_snapshot(&env).unwrap());
+            assert_ne!(before, after);
+        });
+    }
+
+    #[test]
+    fn test_import_validation_rejects_newer_storage_version() {
+        let (env, id, _admin) = setup();
+        env.as_contract(&id, || {
+            let mut snap = export_snapshot(&env).unwrap();
+            snap.storage_version = STORAGE_VERSION + 1;
+            assert_eq!(validate_snapshot_import(&env, &snap), Err(SLAError::VersionMismatch));
+        });
+    }
+
+    #[test]
+    fn test_export_before_initialize_fails() {
+        let env = Env::default();
+        let id = env.register_contract(None, SLACalculatorContract);
+        env.as_contract(&id, || {
+            assert_eq!(export_snapshot(&env).err(), Some(SLAError::NotInitialized));
+        });
+    }
 }
