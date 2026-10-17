@@ -274,6 +274,30 @@ pub fn get_recent_trend(env: &Env, lookback_count: u32) -> Result<TrendData, SLA
     calculate_trend(env, from, to)
 }
 
+/// Direction of the latest compliance trend over the recorded history:
+/// `1` improving, `-1` degrading, `0` flat or not enough data.
+///
+/// The recorded span is split into `bucket_count` buckets and the sign of the
+/// summed bucket-to-bucket compliance change is returned.
+pub fn get_latest_trend_direction(env: &Env, bucket_count: u32) -> Result<i32, SLAError> {
+    let history: soroban_sdk::Vec<SLAResult> = env
+        .storage()
+        .instance()
+        .get(&HISTORY_KEY)
+        .unwrap_or_else(|| soroban_sdk::Vec::new(env));
+    if history.len() < 2 {
+        return Ok(0);
+    }
+    let mut from = u64::MAX;
+    let mut to = 0u64;
+    for entry in history.iter() {
+        from = from.min(entry.recorded_at);
+        to = to.max(entry.recorded_at);
+    }
+    let summary = calculate_trend_summary(env, from, to, bucket_count)?;
+    Ok(summary.trend_direction.signum())
+}
+
 /// Record an SLA outcome for `operator`, feeding the rolling 90-day
 /// compliance score used by `get_operator_tier`.
 pub fn record_operator_outcome(env: &Env, operator: &Address, met: bool) -> Result<(), SLAError> {
@@ -727,6 +751,114 @@ mod rolling_window_tests {
                 record_outage_close(&env, 500, 100),
                 Err(SLAError::InvalidTimestampSequence)
             );
+        });
+    }
+}
+
+#[cfg(test)]
+mod window_aggregation_tests {
+    use super::*;
+    use crate::SLACalculatorContract;
+    use soroban_sdk::{BytesN, Vec};
+
+    fn result(env: &Env, met: bool, mttr: u32, at: u64) -> SLAResult {
+        SLAResult {
+            outage_id: symbol_short!("o"),
+            status: if met { symbol_short!("met") } else { symbol_short!("viol") },
+            mttr_minutes: mttr,
+            threshold_minutes: 30,
+            amount: if met { 100 } else { -50 },
+            payment_type: if met { symbol_short!("rew") } else { symbol_short!("pen") },
+            rating: symbol_short!("good"),
+            config_version_hash: BytesN::from_array(env, &[0u8; 32]),
+            recorded_at: at,
+        }
+    }
+
+    fn seed(env: &Env, entries: &[(bool, u32, u64)]) {
+        let mut history: Vec<SLAResult> = Vec::new(env);
+        for (met, mttr, at) in entries {
+            history.push_back(result(env, *met, *mttr, *at));
+        }
+        env.storage().instance().set(&HISTORY_KEY, &history);
+    }
+
+    #[test]
+    fn test_window_counts_only_entries_inside_the_bounds() {
+        let env = Env::default();
+        let id = env.register_contract(None, SLACalculatorContract);
+        env.as_contract(&id, || {
+            seed(&env, &[(true, 10, 100), (false, 40, 200), (true, 20, 300), (true, 30, 400)]);
+            let t = calculate_trend(&env, 200, 300).unwrap();
+            assert_eq!(t.calculation_count, 2);
+            assert_eq!(t.violation_count, 1);
+            assert_eq!(t.compliance_rate_bps, 5_000);
+            assert_eq!(t.avg_mttr_minutes, 30);
+        });
+    }
+
+    #[test]
+    fn test_window_bounds_are_inclusive() {
+        let env = Env::default();
+        let id = env.register_contract(None, SLACalculatorContract);
+        env.as_contract(&id, || {
+            seed(&env, &[(true, 10, 100), (true, 10, 200)]);
+            assert_eq!(calculate_trend(&env, 100, 200).unwrap().calculation_count, 2);
+            assert_eq!(calculate_trend(&env, 101, 199).unwrap().calculation_count, 0);
+        });
+    }
+
+    #[test]
+    fn test_empty_window_has_zero_compliance_and_mttr() {
+        let env = Env::default();
+        let id = env.register_contract(None, SLACalculatorContract);
+        env.as_contract(&id, || {
+            let t = calculate_trend(&env, 0, 1_000).unwrap();
+            assert_eq!((t.calculation_count, t.compliance_rate_bps, t.avg_mttr_minutes), (0, 0, 0));
+        });
+    }
+
+    #[test]
+    fn test_summary_aggregates_across_buckets() {
+        let env = Env::default();
+        let id = env.register_contract(None, SLACalculatorContract);
+        env.as_contract(&id, || {
+            // Bucket 1 (0..100): one violation. Bucket 2 (100..200): all met.
+            seed(&env, &[(false, 10, 10), (true, 10, 150), (true, 10, 160)]);
+            let s = calculate_trend_summary(&env, 0, 200, 2).unwrap();
+            assert_eq!(s.total_calculations, 3);
+            assert_eq!(s.period_count, 2);
+            assert!(s.trend_direction > 0, "compliance rose from 0 to 100%");
+        });
+    }
+
+    #[test]
+    fn test_summary_rejects_zero_buckets() {
+        let env = Env::default();
+        let id = env.register_contract(None, SLACalculatorContract);
+        env.as_contract(&id, || {
+            assert_eq!(
+                calculate_trend_summary(&env, 0, 100, 0).err(),
+                Some(SLAError::InvalidThreshold)
+            );
+        });
+    }
+
+    #[test]
+    fn test_latest_trend_direction_improving_degrading_and_flat() {
+        let env = Env::default();
+        let id = env.register_contract(None, SLACalculatorContract);
+        env.as_contract(&id, || {
+            assert_eq!(get_latest_trend_direction(&env, 2), Ok(0));
+
+            seed(&env, &[(false, 10, 10), (true, 10, 150), (true, 10, 190)]);
+            assert_eq!(get_latest_trend_direction(&env, 2), Ok(1));
+
+            seed(&env, &[(true, 10, 10), (false, 10, 150), (false, 10, 190)]);
+            assert_eq!(get_latest_trend_direction(&env, 2), Ok(-1));
+
+            seed(&env, &[(true, 10, 10), (true, 10, 190)]);
+            assert_eq!(get_latest_trend_direction(&env, 2), Ok(0));
         });
     }
 }

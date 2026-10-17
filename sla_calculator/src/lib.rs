@@ -27,6 +27,8 @@ pub mod event_log_compaction;
 pub mod event_payload_guard;
 pub mod event_schema;
 pub mod event_ttl_refresh;
+pub mod topic_stability_tests;
+pub mod ttl_guard;
 pub mod force_majeure;
 pub mod history_snapshot;
 pub mod outage_correlation_tag;

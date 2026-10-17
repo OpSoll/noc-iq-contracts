@@ -268,4 +268,43 @@ mod topic_stability_tests {
         }
         panic!("set_int event not found");
     }
+
+    // ── topic symbol snapshot ───────────────────────────────────────────
+
+    /// Snapshot of every event topic symbol. Indexers key on these exact
+    /// strings, so renaming one must be a deliberate, test-updating change.
+    #[test]
+    fn test_event_topic_symbols_match_the_published_snapshot() {
+        let snapshot: [(&str, Symbol, Symbol); 20] = [
+            ("EVENT_SLA_CALC", crate::EVENT_SLA_CALC, symbol_short!("sla_calc")),
+            ("EVENT_SETTLE_INTENT", crate::EVENT_SETTLE_INTENT, symbol_short!("set_int")),
+            ("EVENT_CONFIG_UPD", crate::EVENT_CONFIG_UPD, symbol_short!("cfg_upd")),
+            ("EVENT_PAUSED", crate::EVENT_PAUSED, symbol_short!("paused")),
+            ("EVENT_UNPAUSED", crate::EVENT_UNPAUSED, symbol_short!("unpause")),
+            ("EVENT_OP_SET", crate::EVENT_OP_SET, symbol_short!("op_set")),
+            ("EVENT_PRUNED", crate::EVENT_PRUNED, symbol_short!("pruned")),
+            ("EVENT_PRUNED_AGE", crate::EVENT_PRUNED_AGE, symbol_short!("pruned_a")),
+            ("EVENT_ADMIN_PROP", crate::EVENT_ADMIN_PROP, symbol_short!("adm_prop")),
+            ("EVENT_ADMIN_ACC", crate::EVENT_ADMIN_ACC, symbol_short!("adm_acc")),
+            ("EVENT_ADMIN_CAN", crate::EVENT_ADMIN_CAN, symbol_short!("adm_can")),
+            ("EVENT_ADMIN_REN", crate::EVENT_ADMIN_REN, symbol_short!("adm_ren")),
+            ("EVENT_OP_PROP", crate::EVENT_OP_PROP, symbol_short!("op_prop")),
+            ("EVENT_OP_ACC", crate::EVENT_OP_ACC, symbol_short!("op_acc")),
+            ("EVENT_OP_CAN", crate::EVENT_OP_CAN, symbol_short!("op_can")),
+            ("EVENT_OP_REV", crate::EVENT_OP_REV, symbol_short!("op_rev")),
+            ("EVENT_SLA_VIOLATED", crate::EVENT_SLA_VIOLATED, symbol_short!("sla_viol")),
+            ("EVENT_SLA_MET", crate::EVENT_SLA_MET, symbol_short!("sla_met")),
+            ("EVENT_ROLE_AUDIT", crate::EVENT_ROLE_AUDIT, symbol_short!("role_aud")),
+            ("EVENT_VERSION", crate::EVENT_VERSION, symbol_short!("v1")),
+        ];
+        for (name, actual, expected) in snapshot.iter() {
+            assert_eq!(actual, expected, "{} changed", name);
+        }
+        // Distinct topics must stay distinct.
+        for (i, (name_a, a, _)) in snapshot.iter().enumerate() {
+            for (name_b, b, _) in snapshot.iter().skip(i + 1) {
+                assert!(a != b, "{} and {} collide", name_a, name_b);
+            }
+        }
+    }
 }
