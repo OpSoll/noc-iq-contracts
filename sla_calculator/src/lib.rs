@@ -54,6 +54,7 @@ pub mod version_negotiation;
 pub mod version_discovery;
 pub mod whitelist;
 pub mod zero_downtime_bonus;
+pub mod param_timelock;
 // -----------------------------------------------------------------------
 // Storage keys
 // -----------------------------------------------------------------------
