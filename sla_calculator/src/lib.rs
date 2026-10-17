@@ -28,6 +28,8 @@ pub mod event_payload_guard;
 pub mod event_schema;
 pub mod event_ttl_refresh;
 pub mod force_majeure;
+pub mod threshold_bounds;
+pub mod token_rescue;
 pub mod history_snapshot;
 pub mod outage_correlation_tag;
 pub mod resolution_delay;

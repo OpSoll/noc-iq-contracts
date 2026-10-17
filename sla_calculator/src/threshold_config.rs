@@ -1,6 +1,6 @@
 use soroban_sdk::{contracttype, symbol_short, Address, Env, Symbol, Vec};
 
-use crate::{SLAError, ADMIN_KEY};
+use crate::{SLAConfig, SLAError, ADMIN_KEY, CONFIG_KEY};
 
 // -----------------------------------------------------------------------
 // Storage keys
@@ -194,6 +194,92 @@ pub fn lookup_penalty_rate_bps(env: &Env, availability_bps: u32) -> u32 {
 // -----------------------------------------------------------------------
 // Tests
 // -----------------------------------------------------------------------
+
+/// Every threshold-related parameter configured for one severity.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SeverityThresholds {
+    pub severity: Symbol,
+    pub threshold_minutes: u32,
+    pub penalty_per_minute: i128,
+    pub reward_base: i128,
+    pub top_tier_multiplier: u32,
+    pub excel_tier_multiplier: u32,
+    pub good_tier_multiplier: u32,
+}
+
+/// View returning all thresholds configured for `severity`.
+pub fn get_severity_thresholds(env: &Env, severity: &Symbol) -> Result<SeverityThresholds, SLAError> {
+    let configs: soroban_sdk::Map<Symbol, SLAConfig> = env
+        .storage()
+        .instance()
+        .get(&CONFIG_KEY)
+        .ok_or(SLAError::NotInitialized)?;
+    let config = configs
+        .get(severity.clone())
+        .ok_or(SLAError::ConfigNotFound)?;
+    Ok(SeverityThresholds {
+        severity: severity.clone(),
+        threshold_minutes: config.threshold_minutes,
+        penalty_per_minute: config.penalty_per_minute,
+        reward_base: config.reward_base,
+        top_tier_multiplier: config.top_tier_multiplier,
+        excel_tier_multiplier: config.excel_tier_multiplier,
+        good_tier_multiplier: config.good_tier_multiplier,
+    })
+}
+
+#[cfg(test)]
+mod severity_threshold_view_tests {
+    use super::*;
+    use crate::{SLACalculatorContract, SLACalculatorContractClient};
+    use soroban_sdk::{symbol_short, testutils::Address as _};
+
+    #[test]
+    fn test_view_matches_the_stored_config_for_every_severity() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let id = env.register_contract(None, SLACalculatorContract);
+        let client = SLACalculatorContractClient::new(&env, &id);
+        client.initialize(&Address::generate(&env), &Address::generate(&env));
+        for sev in [
+            symbol_short!("critical"),
+            symbol_short!("high"),
+            symbol_short!("medium"),
+            symbol_short!("low"),
+        ] {
+            let stored = client.get_config(&sev);
+            env.as_contract(&id, || {
+                let view = get_severity_thresholds(&env, &sev).unwrap();
+                assert_eq!(view.threshold_minutes, stored.threshold_minutes);
+                assert_eq!(view.penalty_per_minute, stored.penalty_per_minute);
+                assert_eq!(view.reward_base, stored.reward_base);
+                assert_eq!(view.top_tier_multiplier, stored.top_tier_multiplier);
+            });
+        }
+    }
+
+    #[test]
+    fn test_view_rejects_unknown_severity_and_uninitialised_contract() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let id = env.register_contract(None, SLACalculatorContract);
+        env.as_contract(&id, || {
+            assert_eq!(
+                get_severity_thresholds(&env, &symbol_short!("low")),
+                Err(SLAError::NotInitialized)
+            );
+        });
+        SLACalculatorContractClient::new(&env, &id)
+            .initialize(&Address::generate(&env), &Address::generate(&env));
+        env.as_contract(&id, || {
+            assert_eq!(
+                get_severity_thresholds(&env, &symbol_short!("ultra")),
+                Err(SLAError::ConfigNotFound)
+            );
+        });
+    }
+}
 
 #[cfg(test)]
 mod threshold_tests {

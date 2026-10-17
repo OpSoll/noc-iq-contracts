@@ -20,3 +20,43 @@ pub fn validate_threshold_minutes(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_minimum_and_maximum_are_accepted() {
+        let env = Env::default();
+        assert_eq!(validate_threshold_minutes(&env, MIN_THRESHOLD_MINUTES), Ok(()));
+        assert_eq!(validate_threshold_minutes(&env, MAX_THRESHOLD_MINUTES), Ok(()));
+    }
+
+    #[test]
+    fn test_below_minimum_is_rejected() {
+        let env = Env::default();
+        assert_eq!(
+            validate_threshold_minutes(&env, MIN_THRESHOLD_MINUTES - 1),
+            Err(ThresholdValidationError::ThresholdOutOfBounds)
+        );
+    }
+
+    #[test]
+    fn test_above_maximum_is_rejected() {
+        let env = Env::default();
+        assert_eq!(
+            validate_threshold_minutes(&env, MAX_THRESHOLD_MINUTES + 1),
+            Err(ThresholdValidationError::ThresholdOutOfBounds)
+        );
+        assert_eq!(
+            validate_threshold_minutes(&env, u32::MAX),
+            Err(ThresholdValidationError::ThresholdOutOfBounds)
+        );
+    }
+
+    #[test]
+    fn test_bounds_span_a_full_day() {
+        assert_eq!(MAX_THRESHOLD_MINUTES, 24 * 60);
+        assert!(MIN_THRESHOLD_MINUTES < MAX_THRESHOLD_MINUTES);
+    }
+}
