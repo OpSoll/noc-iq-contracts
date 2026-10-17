@@ -22,3 +22,50 @@ pub fn assert_upgrade_compatible(
         Err(UpgradeGuardError::IncompatibleLayout)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn hash(env: &Env, byte: u8) -> BytesN<32> {
+        BytesN::from_array(env, &[byte; 32])
+    }
+
+    #[test]
+    fn test_verified_hash_is_allowed() {
+        let env = Env::default();
+        let allow = [hash(&env, 1), hash(&env, 2)];
+        assert_eq!(assert_upgrade_compatible(&hash(&env, 2), &allow), Ok(()));
+    }
+
+    #[test]
+    fn test_unverified_hash_is_blocked() {
+        let env = Env::default();
+        let allow = [hash(&env, 1)];
+        assert_eq!(
+            assert_upgrade_compatible(&hash(&env, 9), &allow),
+            Err(UpgradeGuardError::IncompatibleLayout)
+        );
+    }
+
+    #[test]
+    fn test_empty_allowlist_blocks_every_migration() {
+        let env = Env::default();
+        assert_eq!(
+            assert_upgrade_compatible(&hash(&env, 1), &[]),
+            Err(UpgradeGuardError::IncompatibleLayout)
+        );
+    }
+
+    #[test]
+    fn test_hash_differing_in_one_byte_is_blocked() {
+        let env = Env::default();
+        let mut near = [1u8; 32];
+        near[31] = 2;
+        let allow = [hash(&env, 1)];
+        assert_eq!(
+            assert_upgrade_compatible(&BytesN::from_array(&env, &near), &allow),
+            Err(UpgradeGuardError::IncompatibleLayout)
+        );
+    }
+}
