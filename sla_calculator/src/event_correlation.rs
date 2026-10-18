@@ -76,6 +76,21 @@ pub fn correlation_event_topics(
     (event_name, event_version, context, correlation_id)
 }
 
+/// Returns the kinds (e.g. calc, config) of events that share `correlation_id`.
+pub fn events_with_correlation_id(
+    env: &Env,
+    events: &soroban_sdk::Vec<(CorrelationId, Symbol)>,
+    correlation_id: CorrelationId,
+) -> soroban_sdk::Vec<Symbol> {
+    let mut matched = soroban_sdk::Vec::new(env);
+    for (id, kind) in events.iter() {
+        if id == correlation_id {
+            matched.push_back(kind);
+        }
+    }
+    matched
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -166,5 +181,30 @@ mod tests {
             12345,
         );
         assert_eq!(topics.3, 12345u64);
+    }
+
+    #[test]
+    fn test_distinct_operations_use_distinct_correlation_ids() {
+        let env = Env::default();
+        let a1 = generate_correlation_id(&env, &Symbol::new(&env, "OUT_A"), 1);
+        let a2 = generate_correlation_id(&env, &Symbol::new(&env, "OUT_A"), 2);
+        let b1 = generate_correlation_id(&env, &Symbol::new(&env, "OUT_B"), 1);
+        assert_ne!(a1, a2);
+        assert_ne!(a1, b1);
+        assert_ne!(a2, b1);
+    }
+
+    #[test]
+    fn test_events_with_correlation_id_links_calc_and_config() {
+        let env = Env::default();
+        let mut events = soroban_sdk::Vec::new(&env);
+        events.push_back((1u64, symbol_short!("calc")));
+        events.push_back((2u64, symbol_short!("calc")));
+        events.push_back((1u64, symbol_short!("config")));
+
+        let linked = events_with_correlation_id(&env, &events, 1);
+        assert_eq!(linked.len(), 2);
+        assert_eq!(linked.get(0), Some(symbol_short!("calc")));
+        assert_eq!(linked.get(1), Some(symbol_short!("config")));
     }
 }

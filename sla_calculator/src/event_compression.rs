@@ -215,3 +215,59 @@ pub fn estimate_savings(event_count: u32) -> u32 {
     // Savings: ~96 bytes per event
     event_count * 96
 }
+
+/// Returns true when compressing `original_bytes` down to `compressed_bytes`
+/// saves at least `min_percent` percent.
+pub fn meets_min_size_reduction(
+    original_bytes: u32,
+    compressed_bytes: u32,
+    min_percent: u32,
+) -> bool {
+    original_bytes > 0
+        && compressed_bytes < original_bytes
+        && (original_bytes - compressed_bytes) * 100 / original_bytes >= min_percent
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn round_trip_preserves_the_original_event() {
+        let env = Env::default();
+        let original = SLAResult {
+            outage_id: Symbol::new(&env, "OUT001"),
+            status: symbol_short!("viol"),
+            mttr_minutes: 45,
+            threshold_minutes: 30,
+            amount: 500,
+            payment_type: symbol_short!("pen"),
+            rating: symbol_short!("poor"),
+            config_version_hash: 7,
+            recorded_at: 1_000,
+        };
+        let restored = decompress_event(&compress_event(&original));
+        assert_eq!(restored.outage_id, original.outage_id);
+        assert_eq!(restored.status, original.status);
+        assert_eq!(restored.mttr_minutes, original.mttr_minutes);
+        assert_eq!(restored.threshold_minutes, original.threshold_minutes);
+        assert_eq!(restored.amount, original.amount);
+        assert_eq!(restored.payment_type, original.payment_type);
+        assert_eq!(restored.rating, original.rating);
+        assert_eq!(restored.config_version_hash, original.config_version_hash);
+        assert_eq!(restored.recorded_at, original.recorded_at);
+    }
+
+    #[test]
+    fn compression_meets_the_minimum_size_reduction() {
+        // Estimated sizes: ~128 bytes raw vs ~32 bytes compressed per event.
+        assert!(meets_min_size_reduction(128, 32, 50));
+        assert_eq!(estimate_savings(1), 128 - 32);
+    }
+
+    #[test]
+    fn no_size_reduction_fails_the_check() {
+        assert!(!meets_min_size_reduction(128, 128, 1));
+        assert!(!meets_min_size_reduction(128, 200, 1));
+    }
+}
