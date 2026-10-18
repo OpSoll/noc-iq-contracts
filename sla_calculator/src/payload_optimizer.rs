@@ -9,7 +9,7 @@
 //! 3. Omit fields that are fully derivable from other event data
 //! 4. Lazy storage loading for historical audit logs - separate header from metadata
 
-use soroban_sdk::{contracttype, symbol_short, Address, Env, Symbol, Vec};
+use soroban_sdk::{contracttype, symbol_short, Address, Env, Symbol};
 
 /// Derive payment type from SLA status.
 /// Returns "pen" for violation, "rew" for met.
@@ -116,16 +116,22 @@ pub fn has_outage_metadata(env: &Env, outage_id: &Symbol) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use soroban_sdk::{testutils::Address as _, Env};
+    use soroban_sdk::{contract, contractimpl, testutils::Address as _, Env};
 
     #[test]
     fn test_derive_payment_from_met() {
-        assert_eq!(derive_payment_type(&symbol_short!("met")), symbol_short!("rew"));
+        assert_eq!(
+            derive_payment_type(&symbol_short!("met")),
+            symbol_short!("rew")
+        );
     }
 
     #[test]
     fn test_derive_payment_from_viol() {
-        assert_eq!(derive_payment_type(&symbol_short!("viol")), symbol_short!("pen"));
+        assert_eq!(
+            derive_payment_type(&symbol_short!("viol")),
+            symbol_short!("pen")
+        );
     }
 
     #[test]
@@ -137,9 +143,18 @@ mod tests {
 
     #[test]
     fn test_consistent_payment() {
-        assert!(is_consistent_payment(&symbol_short!("met"), &symbol_short!("rew")));
-        assert!(is_consistent_payment(&symbol_short!("viol"), &symbol_short!("pen")));
-        assert!(!is_consistent_payment(&symbol_short!("met"), &symbol_short!("pen")));
+        assert!(is_consistent_payment(
+            &symbol_short!("met"),
+            &symbol_short!("rew")
+        ));
+        assert!(is_consistent_payment(
+            &symbol_short!("viol"),
+            &symbol_short!("pen")
+        ));
+        assert!(!is_consistent_payment(
+            &symbol_short!("met"),
+            &symbol_short!("pen")
+        ));
     }
 
     #[test]
@@ -159,7 +174,7 @@ mod tests {
     fn test_store_and_load_outage_header() {
         let env = Env::default();
         let outage_id = symbol_short!("test_001");
-        
+
         let header = OutageHeader {
             outage_id: outage_id.clone(),
             status: symbol_short!("viol"),
@@ -167,9 +182,9 @@ mod tests {
             threshold_minutes: 15,
             recorded_at: 12345,
         };
-        
+
         store_outage_header(&env, &header);
-        
+
         let loaded = load_outage_header(&env, &outage_id);
         assert!(loaded.is_some());
         let loaded_header = loaded.unwrap();
@@ -185,30 +200,36 @@ mod tests {
         let env = Env::default();
         let outage_id = symbol_short!("test_002");
         let reporter = Address::generate(&env);
-        
+
         let metadata = OutageMetadata {
             outage_id: outage_id.clone(),
             description: soroban_sdk::String::from_str(&env, "Critical network failure"),
             logs: soroban_sdk::String::from_str(&env, "Log entry 1\nLog entry 2"),
             reporter: reporter.clone(),
         };
-        
+
         store_outage_metadata(&env, &metadata);
-        
+
         let loaded = load_outage_metadata(&env, &outage_id);
         assert!(loaded.is_some());
         let loaded_metadata = loaded.unwrap();
         assert_eq!(loaded_metadata.outage_id, outage_id);
-        assert_eq!(loaded_metadata.description, soroban_sdk::String::from_str(&env, "Critical network failure"));
-        assert_eq!(loaded_metadata.logs, soroban_sdk::String::from_str(&env, "Log entry 1\nLog entry 2"));
+        assert_eq!(
+            loaded_metadata.description,
+            soroban_sdk::String::from_str(&env, "Critical network failure")
+        );
+        assert_eq!(
+            loaded_metadata.logs,
+            soroban_sdk::String::from_str(&env, "Log entry 1\nLog entry 2")
+        );
         assert_eq!(loaded_metadata.reporter, reporter);
     }
 
     #[test]
     fn test_load_nonexistent_header_returns_none() {
         let env = Env::default();
-        let outage_id = symbol_short!("nonexistent");
-        
+        let outage_id = symbol_short!("nonexist");
+
         let loaded = load_outage_header(&env, &outage_id);
         assert!(loaded.is_none());
     }
@@ -216,8 +237,8 @@ mod tests {
     #[test]
     fn test_load_nonexistent_metadata_returns_none() {
         let env = Env::default();
-        let outage_id = symbol_short!("nonexistent");
-        
+        let outage_id = symbol_short!("nonexist");
+
         let loaded = load_outage_metadata(&env, &outage_id);
         assert!(loaded.is_none());
     }
@@ -227,10 +248,10 @@ mod tests {
         let env = Env::default();
         let outage_id = symbol_short!("test_003");
         let reporter = Address::generate(&env);
-        
+
         // Initially no metadata
         assert!(!has_outage_metadata(&env, &outage_id));
-        
+
         // Store metadata
         let metadata = OutageMetadata {
             outage_id: outage_id.clone(),
@@ -239,7 +260,7 @@ mod tests {
             reporter,
         };
         store_outage_metadata(&env, &metadata);
-        
+
         // Now metadata exists
         assert!(has_outage_metadata(&env, &outage_id));
     }
@@ -249,9 +270,9 @@ mod tests {
     #[test]
     fn profile_header_only_vs_full_load_instruction_savings() {
         let env = Env::default();
-        let outage_id = symbol_short!("profile_001");
+        let outage_id = symbol_short!("prof_001");
         let reporter = Address::generate(&env);
-        
+
         // Store both header and metadata
         let header = OutageHeader {
             outage_id: outage_id.clone(),
@@ -260,26 +281,85 @@ mod tests {
             threshold_minutes: 15,
             recorded_at: 99999,
         };
-        
+
         let metadata = OutageMetadata {
             outage_id: outage_id.clone(),
             description: soroban_sdk::String::from_str(&env, "Very long description that simulates heavy metadata with lots of details about the outage including technical information, timestamps, and diagnostic data"),
             logs: soroban_sdk::String::from_str(&env, "Extensive log entries:\n[10:00:00] Error detected\n[10:00:05] Investigation started\n[10:00:10] Root cause identified\n[10:00:15] Fix applied\n[10:00:20] Service restored\n[10:00:25] Verification complete"),
             reporter,
         };
-        
+
         store_outage_header(&env, &header);
         store_outage_metadata(&env, &metadata);
-        
+
         // Profile: Load only header (what SLA calculator does)
         let _header_only = load_outage_header(&env, &outage_id);
-        
+
         // Profile: Load full metadata (what audit/dispute does)
         let _full_metadata = load_outage_metadata(&env, &outage_id);
-        
+
         // The header-only load should use significantly fewer instructions
         // because it avoids loading the heavy description and logs strings
         assert!(_header_only.is_some());
         assert!(_full_metadata.is_some());
+    }
+
+    /// `env.storage()` only runs inside a contract invocation
+    /// (`assert_in_contract!`), so the optimized store/load path has to be
+    /// reached through a client rather than called directly from a test.
+    #[contract]
+    struct PayloadOptimizerHarness;
+
+    #[contractimpl]
+    impl PayloadOptimizerHarness {
+        pub fn store_header(env: Env, header: OutageHeader) {
+            store_outage_header(&env, &header);
+        }
+
+        pub fn load_header(env: Env, outage_id: Symbol) -> Option<OutageHeader> {
+            load_outage_header(&env, &outage_id)
+        }
+    }
+
+    /// #894 – optimization must be idempotent: re-optimizing an
+    /// already-optimized payload yields the same payload.
+    #[test]
+    fn optimization_is_idempotent() {
+        let env = Env::default();
+        let client = PayloadOptimizerHarnessClient::new(
+            &env,
+            &env.register_contract(None, PayloadOptimizerHarness),
+        );
+        let outage_id = symbol_short!("idem_001");
+        let header = OutageHeader {
+            outage_id: outage_id.clone(),
+            status: symbol_short!("viol"),
+            mttr_minutes: 45,
+            threshold_minutes: 15,
+            recorded_at: 4242,
+        };
+
+        // First optimization pass: the payload is stored in optimized form.
+        client.store_header(&header);
+        let once = client.load_header(&outage_id).expect("payload stored");
+
+        // Second pass: optimize the payload we already optimized. A store of
+        // the loaded (optimized) header is exactly the pipeline a re-ingest
+        // would run.
+        client.store_header(&once);
+        let twice = client.load_header(&outage_id).expect("payload stored");
+
+        assert_eq!(once, twice, "re-optimizing changed the payload");
+
+        // The derivable half of the optimization is stable too: payment type
+        // still follows status, so nothing new became derivable-and-stale.
+        assert_eq!(
+            derive_payment_type(&once.status),
+            derive_payment_type(&twice.status)
+        );
+        assert!(is_consistent_payment(
+            &twice.status,
+            &derive_payment_type(&twice.status)
+        ));
     }
 }
