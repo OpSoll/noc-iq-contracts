@@ -8,13 +8,25 @@ pub fn needs_refresh(remaining_ledgers: u32) -> bool {
     remaining_ledgers < TTL_THRESHOLD_LEDGERS
 }
 
+/// Returns the larger of the current TTL and the requested extension so a
+/// refresh can never shorten an existing TTL.
+pub fn guarded_extend_to(current_remaining: u32, requested_extend_to: u32) -> u32 {
+    if requested_extend_to < current_remaining {
+        current_remaining
+    } else {
+        requested_extend_to
+    }
+}
+
 pub fn refresh_outage_index_ttl(env: &Env, key: &Symbol) -> bool {
     if !env.storage().persistent().has(key) {
         return false;
     }
+    let current = env.storage().persistent().get_ttl(key);
+    let target = guarded_extend_to(current, TTL_EXTEND_TO_LEDGERS);
     env.storage()
         .persistent()
-        .extend_ttl(key, TTL_THRESHOLD_LEDGERS, TTL_EXTEND_TO_LEDGERS);
+        .extend_ttl(key, TTL_THRESHOLD_LEDGERS, target);
     true
 }
 
@@ -130,6 +142,31 @@ mod tests {
             seed(&env, &key);
             assert!(refresh_outage_index_ttl(&env, &key));
             assert!(refresh_outage_index_ttl(&env, &key));
+        });
+    }
+
+    #[test]
+    fn guarded_extend_to_never_shortens_a_ttl() {
+        assert_eq!(guarded_extend_to(600_000, TTL_EXTEND_TO_LEDGERS), 600_000);
+        assert_eq!(
+            guarded_extend_to(10, TTL_EXTEND_TO_LEDGERS),
+            TTL_EXTEND_TO_LEDGERS
+        );
+    }
+
+    #[test]
+    fn refresh_does_not_regress_a_large_ttl() {
+        let env = Env::default();
+        env.as_contract(&contract(&env), || {
+            let key = Symbol::new(&env, "OUT1");
+            seed(&env, &key);
+            env.storage()
+                .persistent()
+                .extend_ttl(&key, 600_000, 1_000_000);
+            let before = env.storage().persistent().get_ttl(&key);
+            refresh_outage_index_ttl(&env, &key);
+            let after = env.storage().persistent().get_ttl(&key);
+            assert!(after >= before);
         });
     }
 }
