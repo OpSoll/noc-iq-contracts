@@ -8,6 +8,8 @@ use crate::{SLAResult, SLAError, HISTORY_KEY};
 // Storage keys
 // -----------------------------------------------------------------------
 const EVENT_INDEX_KEY: Symbol = symbol_short!("EIDX");
+const MAX_INDEX_SIZE_KEY: Symbol = symbol_short!("EIDXMAX");
+const DEFAULT_MAX_INDEX_SIZE: u32 = 1000;
 
 // -----------------------------------------------------------------------
 // Types
@@ -53,8 +55,12 @@ pub fn build_event_index(env: &Env) -> Result<EventIndex, SLAError> {
         .unwrap_or_else(|| soroban_sdk::Vec::new(env));
 
     let mut entries = soroban_sdk::Vec::new(env);
+    let max_size = get_max_index_size(env);
 
     for i in 0..history.len() {
+        if entries.len() >= max_size {
+            break;
+        }
         let result = history.get(i).unwrap();
         entries.push_back(EventIndexEntry {
             position: i,
@@ -172,4 +178,106 @@ pub fn get_index_metadata(
 /// Invalidate the index (call after mutations).
 pub fn invalidate_index(env: &Env) {
     env.storage().instance().remove(&EVENT_INDEX_KEY);
+}
+
+/// Get the configured maximum number of index entries.
+pub fn get_max_index_size(env: &Env) -> u32 {
+    env.storage()
+        .instance()
+        .get(&MAX_INDEX_SIZE_KEY)
+        .unwrap_or(DEFAULT_MAX_INDEX_SIZE)
+}
+
+/// Configure the maximum number of index entries.
+pub fn set_max_index_size(env: &Env, max_size: u32) {
+    env.storage().instance().set(&MAX_INDEX_SIZE_KEY, &max_size);
+}
+
+/// Remove index entries recorded before `cutoff`; returns how many were pruned.
+pub fn prune_index_before(env: &Env, cutoff: u64) -> Result<u32, SLAError> {
+    let index = get_event_index(env)?;
+    let mut kept = soroban_sdk::Vec::new(env);
+
+    for i in 0..index.entries.len() {
+        let entry = index.entries.get(i).unwrap();
+        if entry.recorded_at >= cutoff {
+            kept.push_back(entry);
+        }
+    }
+
+    let pruned = index.count - kept.len();
+    let updated = EventIndex {
+        count: kept.len(),
+        entries: kept,
+    };
+    env.storage().instance().set(&EVENT_INDEX_KEY, &updated);
+    Ok(pruned)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::SLACalculatorContract;
+
+    fn sample_result(env: &Env, id: &str, recorded_at: u64) -> SLAResult {
+        SLAResult {
+            outage_id: Symbol::new(env, id),
+            status: symbol_short!("met"),
+            mttr_minutes: 10,
+            threshold_minutes: 30,
+            amount: 100,
+            payment_type: symbol_short!("rew"),
+            rating: symbol_short!("good"),
+            config_version_hash: 1,
+            recorded_at,
+        }
+    }
+
+    fn sample_entry(env: &Env, position: u32, recorded_at: u64) -> EventIndexEntry {
+        EventIndexEntry {
+            position,
+            outage_id: Symbol::new(env, "OUT"),
+            recorded_at,
+            status: symbol_short!("met"),
+            payment_type: symbol_short!("rew"),
+        }
+    }
+
+    #[test]
+    fn index_size_never_exceeds_the_configured_maximum() {
+        let env = Env::default();
+        let contract = env.register_contract(None, SLACalculatorContract);
+        env.as_contract(&contract, || {
+            let mut history = soroban_sdk::Vec::new(&env);
+            for i in 0..3u32 {
+                history.push_back(sample_result(&env, "OUT", i as u64));
+            }
+            env.storage().instance().set(&HISTORY_KEY, &history);
+            set_max_index_size(&env, 2);
+            let index = build_event_index(&env).ok().unwrap();
+            assert_eq!(index.count, 2);
+            assert_eq!(index.entries.len(), 2);
+        });
+    }
+
+    #[test]
+    fn pruning_removes_only_entries_before_the_cutoff() {
+        let env = Env::default();
+        let contract = env.register_contract(None, SLACalculatorContract);
+        env.as_contract(&contract, || {
+            let mut entries = soroban_sdk::Vec::new(&env);
+            entries.push_back(sample_entry(&env, 0, 10));
+            entries.push_back(sample_entry(&env, 1, 20));
+            entries.push_back(sample_entry(&env, 2, 30));
+            let index = EventIndex { count: 3, entries };
+            env.storage().instance().set(&EVENT_INDEX_KEY, &index);
+
+            assert_eq!(prune_index_before(&env, 20).ok(), Some(1));
+
+            let pruned = get_event_index(&env).ok().unwrap();
+            assert_eq!(pruned.count, 2);
+            assert_eq!(pruned.entries.get(0).unwrap().position, 1);
+            assert_eq!(pruned.entries.get(1).unwrap().position, 2);
+        });
+    }
 }

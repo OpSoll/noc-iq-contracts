@@ -38,6 +38,7 @@ pub struct EventFilter {
 ///
 /// Returns a paginated list of SLA results matching the filter criteria.
 /// Results are ordered by `recorded_at` ascending (oldest first).
+/// An empty filter (all `None`) matches every event, subject only to pagination.
 ///
 /// # Arguments
 /// - `from_timestamp`: Start of time range (inclusive). None for no lower bound.
@@ -215,4 +216,82 @@ pub fn get_rewards_in_range(
         0,
         limit,
     )
+}
+
+/// Filter `(topic, recorded_at)` event pairs down to those matching `topic`.
+pub fn filter_by_topic(
+    env: &Env,
+    events: &soroban_sdk::Vec<(Symbol, u64)>,
+    topic: &Symbol,
+) -> soroban_sdk::Vec<(Symbol, u64)> {
+    let mut matched = soroban_sdk::Vec::new(env);
+    for (event_topic, recorded_at) in events.iter() {
+        if event_topic == *topic {
+            matched.push_back((event_topic, recorded_at));
+        }
+    }
+    matched
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::SLACalculatorContract;
+
+    fn sample_result(env: &Env, id: &str, recorded_at: u64) -> SLAResult {
+        SLAResult {
+            outage_id: Symbol::new(env, id),
+            status: symbol_short!("met"),
+            mttr_minutes: 10,
+            threshold_minutes: 30,
+            amount: 100,
+            payment_type: symbol_short!("rew"),
+            rating: symbol_short!("good"),
+            config_version_hash: 1,
+            recorded_at,
+        }
+    }
+
+    #[test]
+    fn empty_filter_returns_all_events() {
+        let env = Env::default();
+        let contract = env.register_contract(None, SLACalculatorContract);
+        env.as_contract(&contract, || {
+            let mut history = soroban_sdk::Vec::new(&env);
+            history.push_back(sample_result(&env, "A", 1));
+            history.push_back(sample_result(&env, "B", 2));
+            env.storage().instance().set(&HISTORY_KEY, &history);
+
+            let all = filter_events(&env, None, None, None, None, 0, 10).ok().unwrap();
+            assert_eq!(all.len(), 2);
+            assert_eq!(
+                count_filtered_events(&env, None, None, None, None).ok(),
+                Some(2)
+            );
+        });
+    }
+
+    #[test]
+    fn empty_filter_on_empty_history_returns_nothing() {
+        let env = Env::default();
+        let contract = env.register_contract(None, SLACalculatorContract);
+        env.as_contract(&contract, || {
+            let all = filter_events(&env, None, None, None, None, 0, 10).ok().unwrap();
+            assert_eq!(all.len(), 0);
+        });
+    }
+
+    #[test]
+    fn filtering_by_topic_returns_only_matching_events() {
+        let env = Env::default();
+        let mut events = soroban_sdk::Vec::new(&env);
+        events.push_back((symbol_short!("sla_calc"), 1u64));
+        events.push_back((symbol_short!("cfg_upd"), 2u64));
+        events.push_back((symbol_short!("sla_calc"), 3u64));
+
+        let matched = filter_by_topic(&env, &events, &symbol_short!("sla_calc"));
+        assert_eq!(matched.len(), 2);
+        assert_eq!(matched.get(0), Some((symbol_short!("sla_calc"), 1u64)));
+        assert_eq!(matched.get(1), Some((symbol_short!("sla_calc"), 3u64)));
+    }
 }
