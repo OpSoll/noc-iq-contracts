@@ -193,6 +193,11 @@ pub fn total_locked(env: &Env) -> i128 {
     total
 }
 
+/// Conservation invariant: paid-out plus residual collateral equals the original lock.
+pub fn lock_conserved(original: i128, paid_out: i128, residual: i128) -> bool {
+    paid_out + residual == original
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -435,5 +440,36 @@ mod tests {
             payout_from_collateral(&env, &provider, 100_000, 200).expect("paid");
             assert_eq!(env.events().all().len(), before + 1);
         });
+    }
+
+    #[test]
+    fn partial_unlocks_leave_the_residual_balance() {
+        let env = Env::default();
+        env.as_contract(&contract(&env), || {
+            let provider = contract(&env);
+            lock_collateral(&env, &provider, 1_000_000, 10_000, 100).expect("locked");
+            payout_from_collateral(&env, &provider, 300_000, 200).expect("paid");
+            payout_from_collateral(&env, &provider, 200_000, 300).expect("paid");
+            assert_eq!(available_collateral(&env, &provider), 500_000);
+            assert_eq!(lock_state(&env, &provider), LockState::Locked);
+        });
+    }
+
+    #[test]
+    fn unlocked_plus_residual_equals_the_original_lock() {
+        let env = Env::default();
+        env.as_contract(&contract(&env), || {
+            let provider = contract(&env);
+            lock_collateral(&env, &provider, 1_000_000, 10_000, 100).expect("locked");
+            payout_from_collateral(&env, &provider, 400_000, 200).expect("paid");
+            let residual = available_collateral(&env, &provider);
+            assert_eq!(400_000 + residual, 1_000_000);
+        });
+    }
+
+    #[test]
+    fn the_conservation_invariant_fails_when_totals_diverge() {
+        assert!(lock_conserved(1_000, 400, 600));
+        assert!(!lock_conserved(1_000, 400, 500));
     }
 }

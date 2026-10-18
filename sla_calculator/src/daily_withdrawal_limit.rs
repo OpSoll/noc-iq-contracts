@@ -33,3 +33,58 @@ pub fn check_daily_withdrawal_limit(
     }
     Ok(())
 }
+
+/// Returns the remaining allowance for the current window and when it ends.
+pub fn remaining_daily_allowance(
+    env: &Env,
+    window: &WithdrawalWindow,
+    vault_reserves: i128,
+) -> (i128, u64) {
+    let now = env.ledger().timestamp();
+    let window_end = window.window_started_at + TWENTY_FOUR_HOURS_SECS;
+    let daily_cap = vault_reserves / 10;
+    if now < window_end {
+        ((daily_cap - window.withdrawn_so_far).max(0), window_end)
+    } else {
+        (daily_cap, now + TWENTY_FOUR_HOURS_SECS)
+    }
+}
+
+#[cfg(test)]
+mod window_tests {
+    use super::*;
+
+    fn window() -> WithdrawalWindow {
+        WithdrawalWindow {
+            window_started_at: 1_000,
+            withdrawn_so_far: 100,
+        }
+    }
+
+    #[test]
+    fn remaining_allowance_reports_cap_minus_withdrawn_and_window_end() {
+        let env = Env::default();
+        env.ledger().with_mut(|l| l.timestamp = 1_500);
+        let (remaining, window_end) = remaining_daily_allowance(&env, &window(), 2_000);
+        assert_eq!(remaining, 100);
+        assert_eq!(window_end, 1_000 + TWENTY_FOUR_HOURS_SECS);
+    }
+
+    #[test]
+    fn allowance_is_still_used_just_before_rollover() {
+        let env = Env::default();
+        env.ledger()
+            .with_mut(|l| l.timestamp = 1_000 + TWENTY_FOUR_HOURS_SECS - 1);
+        let result = check_daily_withdrawal_limit(&env, &window(), 1, 1_000);
+        assert_eq!(result, Err(WithdrawalLimitError::DailyLimitExceeded));
+    }
+
+    #[test]
+    fn allowance_resets_just_after_rollover() {
+        let env = Env::default();
+        env.ledger()
+            .with_mut(|l| l.timestamp = 1_000 + TWENTY_FOUR_HOURS_SECS);
+        let result = check_daily_withdrawal_limit(&env, &window(), 100, 1_000);
+        assert_eq!(result, Ok(()));
+    }
+}
