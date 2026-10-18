@@ -56,6 +56,29 @@ mod event_ordering_tests {
         names.iter().filter(|n| *n == target).count()
     }
 
+    /// Returns the index of the first element that breaks monotonic
+    /// non-decreasing order, or `None` when the sequence is monotonic.
+    fn first_out_of_order(sequence: &[u64]) -> Option<usize> {
+        for i in 1..sequence.len() {
+            if sequence[i] < sequence[i - 1] {
+                return Some(i);
+            }
+        }
+        None
+    }
+
+    /// Asserts that a sequence of ordering keys never decreases.
+    fn assert_monotonic_sequence(sequence: &[u64]) {
+        if let Some(index) = first_out_of_order(sequence) {
+            panic!(
+                "sequence is not monotonic at index {}: {} follows {}",
+                index,
+                sequence[index],
+                sequence[index - 1]
+            );
+        }
+    }
+
     // ── 1. cfg_upd precedes subsequent sla_calc ─────────────────────────
 
     #[test]
@@ -271,5 +294,19 @@ mod event_ordering_tests {
             *named[5], EVENT_SETTLE_INTENT,
             "Sixth event must be set_int"
         );
+    }
+
+    // ── 6. Monotonic sequence assertion helper ─────────────────
+
+    #[test]
+    fn monotonic_sequence_helper_accepts_non_decreasing_keys() {
+        assert_eq!(first_out_of_order(&[1, 1, 2, 3, 5]), None);
+        assert_monotonic_sequence(&[1, 1, 2, 3, 5]);
+    }
+
+    #[test]
+    fn monotonic_sequence_helper_flags_out_of_order_keys() {
+        assert_eq!(first_out_of_order(&[10, 20, 15]), Some(2));
+        assert_eq!(first_out_of_order(&[5, 4, 3]), Some(1));
     }
 }

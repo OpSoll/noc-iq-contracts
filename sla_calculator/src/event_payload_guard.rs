@@ -5,6 +5,7 @@ use soroban_sdk::{contracttype, symbol_short, Env, String, Symbol};
 pub const MAX_PAYLOAD_BYTES: u32 = 200;
 pub const MAX_DESCRIPTION_BYTES: u32 = 128;
 pub const MAX_METADATA_BYTES: u32 = 96;
+pub const MAX_EVENT_FIELDS: u32 = 8;
 pub const PAYLOAD_REJECTED: Symbol = symbol_short!("too_big");
 pub const PAYLOAD_OK: Symbol = symbol_short!("pl_ok");
 
@@ -14,6 +15,7 @@ pub enum PayloadError {
     DescriptionTooLarge,
     MetadataTooLarge,
     PayloadTooLarge,
+    TooManyFields,
 }
 
 #[contracttype]
@@ -73,6 +75,13 @@ pub fn validate_payload(
         return Err(PayloadError::PayloadTooLarge);
     }
     Ok(total)
+}
+
+pub fn validate_field_count(field_count: u32) -> Result<(), PayloadError> {
+    if field_count > MAX_EVENT_FIELDS {
+        return Err(PayloadError::TooManyFields);
+    }
+    Ok(())
 }
 
 pub fn inspect(env: &Env, description: &String, metadata: &String) -> PayloadReport {
@@ -237,5 +246,15 @@ mod tests {
             emit_accepted(&env, outage, &report);
             assert_eq!(env.events().all().len(), 1);
         });
+    }
+
+    #[test]
+    fn over_limit_field_counts_are_rejected() {
+        assert_eq!(validate_field_count(0), Ok(()));
+        assert_eq!(validate_field_count(MAX_EVENT_FIELDS), Ok(()));
+        assert_eq!(
+            validate_field_count(MAX_EVENT_FIELDS + 1),
+            Err(PayloadError::TooManyFields)
+        );
     }
 }
