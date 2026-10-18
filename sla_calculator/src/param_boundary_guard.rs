@@ -28,3 +28,50 @@ pub fn assert_params_within_bounds(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sla_target_lower_bound_is_inclusive() {
+        assert_eq!(assert_params_within_bounds(MIN_SLA_TARGET_BPS, 0), Ok(()));
+    }
+
+    #[test]
+    fn sla_target_below_lower_bound_is_rejected() {
+        assert_eq!(
+            assert_params_within_bounds(MIN_SLA_TARGET_BPS - 1, 0),
+            Err(InvalidConfigParameter::SlaTargetOutOfRange)
+        );
+    }
+
+    #[test]
+    fn sla_target_upper_bound_is_inclusive() {
+        assert_eq!(assert_params_within_bounds(MAX_SLA_TARGET_BPS, 0), Ok(()));
+    }
+
+    #[test]
+    fn sla_target_above_upper_bound_is_rejected() {
+        assert_eq!(
+            assert_params_within_bounds(MAX_SLA_TARGET_BPS + 1, 0),
+            Err(InvalidConfigParameter::SlaTargetOutOfRange)
+        );
+    }
+
+    #[test]
+    fn penalty_upper_bound_is_inclusive() {
+        assert_eq!(
+            assert_params_within_bounds(MIN_SLA_TARGET_BPS, MAX_PENALTY_BPS),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn penalty_above_upper_bound_is_rejected() {
+        assert_eq!(
+            assert_params_within_bounds(MIN_SLA_TARGET_BPS, MAX_PENALTY_BPS + 1),
+            Err(InvalidConfigParameter::PenaltyBpsOutOfRange)
+        );
+    }
+}

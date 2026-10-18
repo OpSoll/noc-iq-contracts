@@ -46,7 +46,10 @@ pub mod token_rescue;
 pub mod history_snapshot;
 pub mod outage_correlation_tag;
 pub mod proposal_execution_queue;
+pub mod penalty_bounds;
+pub mod rating;
 pub mod resolution_delay;
+pub mod reward_cap;
 pub mod state_integrity;
 pub mod storage_helpers;
 pub mod threshold_config;
@@ -55,6 +58,7 @@ pub mod version_negotiation;
 pub mod version_discovery;
 pub mod whitelist;
 pub mod zero_downtime_bonus;
+pub mod event_ordering_tests;
 // -----------------------------------------------------------------------
 // Storage keys
 // -----------------------------------------------------------------------
