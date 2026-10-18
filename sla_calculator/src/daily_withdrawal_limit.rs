@@ -17,6 +17,26 @@ pub struct WithdrawalWindow {
     pub withdrawn_so_far: i128,
 }
 
+/// Clamps a per-asset daily limit so it never exceeds the global daily limit.
+pub fn clamp_asset_limit(asset_limit: i128, global_limit: i128) -> i128 {
+    asset_limit.min(global_limit)
+}
+
+#[cfg(test)]
+mod override_guard_tests {
+    use super::*;
+
+    #[test]
+    fn override_above_the_global_limit_is_clamped() {
+        assert_eq!(clamp_asset_limit(500, 100), 100);
+    }
+
+    #[test]
+    fn override_within_the_global_limit_is_kept() {
+        assert_eq!(clamp_asset_limit(50, 100), 50);
+    }
+}
+
 /// Rejects a withdrawal if it would exceed 10% of vault reserves within
 /// the current 24-hour rolling window.
 pub fn check_daily_withdrawal_limit(
