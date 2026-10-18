@@ -5,6 +5,7 @@ use soroban_sdk::{contracterror, contracttype, symbol_short, Env, Symbol, Vec};
 // Storage keys & events
 // -----------------------------------------------------------------------
 const MONTHLY_SNAPSHOT_PREFIX: Symbol = symbol_short!("MSNAP");
+const SNAPSHOT_COUNT_KEY: Symbol = symbol_short!("MSNAPCT");
 const EVENT_MONTHLY_SNAP: Symbol = symbol_short!("m_snap");
 const EVENT_VERSION: Symbol = symbol_short!("v1");
 
@@ -106,6 +107,15 @@ pub fn snapshot_monthly_sla(
 
     env.storage().persistent().set(&key, &snapshot);
 
+    let finalized: u32 = env
+        .storage()
+        .persistent()
+        .get(&SNAPSHOT_COUNT_KEY)
+        .unwrap_or(0);
+    env.storage()
+        .persistent()
+        .set(&SNAPSHOT_COUNT_KEY, &(finalized + 1));
+
     env.events().publish(
         (EVENT_MONTHLY_SNAP, EVENT_VERSION),
         (month_index, final_compliance_status),
@@ -115,6 +125,14 @@ pub fn snapshot_monthly_sla(
 }
 
 /// Retrieves a finalized monthly SLA summary snapshot from persistent storage by month index.
+/// Returns the number of finalized monthly snapshots, for pagination.
+pub fn snapshot_count(env: &Env) -> u32 {
+    env.storage()
+        .persistent()
+        .get(&SNAPSHOT_COUNT_KEY)
+        .unwrap_or(0)
+}
+
 pub fn get_monthly_sla_snapshot(
     env: &Env,
     month_index: u32,
@@ -245,5 +263,17 @@ mod tests {
         );
         let stats = client.get_stats();
         assert_eq!(stats.total_calculations, 2);
+    }
+
+    #[test]
+    fn snapshot_count_tracks_finalized_snapshots() {
+        let env = Env::default();
+        let cid = env.register_contract(None, SLACalculatorContract);
+        env.as_contract(&cid, || {
+            assert_eq!(snapshot_count(&env), 0);
+            snapshot_monthly_sla(&env, 202609, 100, 25, symbol_short!("met")).unwrap();
+            snapshot_monthly_sla(&env, 202610, 120, 30, symbol_short!("viol")).unwrap();
+            assert_eq!(snapshot_count(&env), 2);
+        });
     }
 }
