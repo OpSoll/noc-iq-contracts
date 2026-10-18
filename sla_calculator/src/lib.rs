@@ -45,6 +45,8 @@ pub mod threshold_bounds;
 pub mod token_rescue;
 pub mod history_snapshot;
 pub mod outage_correlation_tag;
+pub mod pause_status;
+pub mod payload_optimizer;
 pub mod resolution_delay;
 pub mod state_integrity;
 pub mod storage_helpers;
