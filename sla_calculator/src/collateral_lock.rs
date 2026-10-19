@@ -182,6 +182,22 @@ pub fn release_collateral(
     Ok(released)
 }
 
+
+/// View: locked collateral amounts keyed by site/provider (#832).
+/// Only entries currently in `LockState::Locked` are included.
+pub fn locked_amounts_by_site(env: &Env) -> Map<Address, i128> {
+    let records = collateral_map(env);
+    let mut out = Map::new(env);
+    for provider in records.keys() {
+        if let Some(record) = records.get(provider.clone()) {
+            if record.state == LockState::Locked {
+                out.set(provider, record.amount);
+            }
+        }
+    }
+    out
+}
+
 pub fn total_locked(env: &Env) -> i128 {
     let mut total = 0i128;
     for (provider, record) in collateral_map(env).iter() {
@@ -471,5 +487,21 @@ mod tests {
     fn the_conservation_invariant_fails_when_totals_diverge() {
         assert!(lock_conserved(1_000, 400, 600));
         assert!(!lock_conserved(1_000, 400, 500));
+    }
+
+    #[test]
+    fn locked_amounts_by_site_lists_only_locked() {
+        let env = Env::default();
+        env.as_contract(&contract(&env), || {
+            let a = contract(&env);
+            let b = contract(&env);
+            lock_collateral(&env, &a, 400_000, 10_000, 100).expect("locked");
+            lock_collateral(&env, &b, 600_000, 10_000, 100).expect("locked");
+            release_collateral(&env, &a, 300).expect("released");
+            let listed = locked_amounts_by_site(&env);
+            assert_eq!(listed.len(), 1);
+            assert_eq!(listed.get(b.clone()), Some(600_000));
+            assert_eq!(listed.get(a.clone()), None);
+        });
     }
 }

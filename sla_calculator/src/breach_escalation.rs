@@ -9,6 +9,9 @@ pub const FIRST_BREACH_FACTOR_BPS: u32 = 10_000;
 pub const STEP_FACTOR_BPS: u32 = 2_000;
 pub const MAX_FACTOR_BPS: u32 = 28_000;
 pub const MAX_STRIKES: u32 = 10;
+/// Configurable hard cap for escalation level (#828). Defaults to MAX_STRIKES.
+pub const DEFAULT_MAX_ESCALATION_LEVEL: u32 = MAX_STRIKES;
+pub const MAX_LEVEL_KEY: Symbol = symbol_short!("max_lvl");
 pub const MAX_PENALTY_BPS: u32 = 20_000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -87,6 +90,33 @@ pub fn penalty_terms(env: &Env, provider: &Address, base_penalty_bps: u32) -> Pe
     }
 }
 
+
+/// Current escalation level for a site/provider (#826).
+/// Level is the stored breach strike count (0 if none).
+pub fn escalation_level(env: &Env, site: &Address) -> u32 {
+    breach_count(env, site)
+}
+
+/// Configured maximum escalation level (#828).
+pub fn max_escalation_level(env: &Env) -> u32 {
+    env.storage()
+        .instance()
+        .get(&MAX_LEVEL_KEY)
+        .unwrap_or(DEFAULT_MAX_ESCALATION_LEVEL)
+}
+
+/// Admin/config path: set the max escalation level cap (#828).
+pub fn set_max_escalation_level(env: &Env, max_level: u32) {
+    let capped = if max_level == 0 {
+        1
+    } else if max_level > MAX_STRIKES {
+        MAX_STRIKES
+    } else {
+        max_level
+    };
+    env.storage().instance().set(&MAX_LEVEL_KEY, &capped);
+}
+
 pub fn record_breach(
     env: &Env,
     provider: &Address,
@@ -100,9 +130,10 @@ pub fn record_breach(
         return Err(EscalationError::PenaltyOutOfRange);
     }
     let previous = breach_record(env, provider);
+    let level_cap = max_escalation_level(env);
     let breaches = match &previous {
-        Some(record) if record.breaches < MAX_STRIKES => record.breaches + 1,
-        Some(_) => MAX_STRIKES,
+        Some(record) if record.breaches < level_cap => record.breaches + 1,
+        Some(_) => level_cap,
         None => 1,
     };
     let factor_bps = escalation_factor_bps(breaches);
