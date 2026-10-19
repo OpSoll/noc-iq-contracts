@@ -290,4 +290,53 @@ mod tests {
             assert_eq!(env.events().all().len(), 2);
         });
     }
+
+    /// #827 — escalation level must stay elevated until resolution clears it.
+    #[test]
+    fn level_does_not_reset_before_resolution() {
+        let env = Env::default();
+        env.as_contract(&contract(&env), || {
+            let provider = contract(&env);
+            record_breach(&env, &provider, 1_000, 10).expect("breach");
+            record_breach(&env, &provider, 1_000, 20).expect("breach");
+            record_breach(&env, &provider, 1_000, 30).expect("breach");
+            // Still escalated — no clear_strikes yet.
+            assert_eq!(breach_count(&env, &provider), 3);
+            assert_eq!(escalation_factor_bps(breach_count(&env, &provider)), 14_000);
+            let terms = penalty_terms(&env, &provider, 1_000);
+            assert_eq!(terms.effective_penalty_bps, 1_400);
+            assert_eq!(terms.factor_bps, 14_000);
+        });
+    }
+
+    /// #827 — only resolution (`clear_strikes`) resets the escalation level.
+    #[test]
+    fn level_resets_only_after_resolution() {
+        let env = Env::default();
+        env.as_contract(&contract(&env), || {
+            let provider = contract(&env);
+            record_breach(&env, &provider, 1_000, 10).expect("breach");
+            record_breach(&env, &provider, 1_000, 20).expect("breach");
+            assert_eq!(breach_count(&env, &provider), 2);
+            assert_ne!(
+                escalation_factor_bps(breach_count(&env, &provider)),
+                FIRST_BREACH_FACTOR_BPS
+            );
+
+            let cleared = clear_strikes(&env, &provider);
+            assert_eq!(cleared, 2);
+            // After resolution the level is back to the base factor.
+            assert_eq!(breach_count(&env, &provider), 0);
+            assert_eq!(
+                escalation_factor_bps(breach_count(&env, &provider)),
+                FIRST_BREACH_FACTOR_BPS
+            );
+            let terms = penalty_terms(&env, &provider, 1_000);
+            assert_eq!(terms.factor_bps, FIRST_BREACH_FACTOR_BPS);
+            assert_eq!(terms.effective_penalty_bps, 1_000);
+            assert!(breach_record(&env, &provider).is_none());
+        });
+    }
+
+
 }

@@ -7,6 +7,8 @@ pub const EXPIRED: Symbol = symbol_short!("expired");
 pub const BPS_DENOMINATOR: i128 = 10_000;
 pub const MAX_CLAIM_BPS: u32 = 20_000;
 pub const MAX_WINDOW_S: u64 = 2_592_000;
+pub const MAX_EXTENSIONS: u32 = 2;
+pub const EXTENDED: Symbol = symbol_short!("extend");
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[contracttype]
@@ -25,6 +27,8 @@ pub struct ClaimWindow {
     pub deadline: u64,
     pub max_claim_bps: u32,
     pub state: ClaimState,
+    /// Number of times this open window has been extended (#831).
+    pub extensions: u32,
 }
 
 #[derive(Clone, Debug)]
@@ -47,6 +51,8 @@ pub enum ClaimError {
     AlreadyExpired,
     ZeroAmount,
     NegativeAmount,
+    ExtensionLimitReached,
+    ZeroExtension,
 }
 
 pub fn window_map(env: &Env) -> Map<Symbol, ClaimWindow> {
@@ -79,6 +85,16 @@ pub fn claim_state(env: &Env, claim_id: &Symbol, now: u64) -> ClaimState {
 
 pub fn is_claimable(env: &Env, claim_id: &Symbol, now: u64) -> bool {
     claim_state(env, claim_id, now) == ClaimState::Open
+}
+
+
+/// Public view: remaining seconds until the claim deadline (#829).
+/// Returns 0 when the claim is missing, already claimed, or past the deadline.
+pub fn remaining_claim_time(env: &Env, claim_id: &Symbol, now: u64) -> u32 {
+    match claim_state(env, claim_id, now) {
+        ClaimState::Open => seconds_remaining(env, claim_id, now),
+        ClaimState::Absent | ClaimState::Claimed | ClaimState::Expired => 0,
+    }
 }
 
 pub fn seconds_remaining(env: &Env, claim_id: &Symbol, now: u64) -> u32 {
@@ -156,6 +172,7 @@ pub fn open_claim_window(
         deadline,
         max_claim_bps,
         state: ClaimState::Open,
+        extensions: 0,
     };
     let mut windows = window_map(env);
     windows.set(claim_id.clone(), window);
@@ -181,6 +198,47 @@ pub fn claim(env: &Env, claim_id: &Symbol, gross: i128, now: u64) -> Result<Payo
     };
     env.events().publish((CLAIMED, claim_id.clone()), amount);
     Ok(payout)
+}
+
+
+/// Extend an open claim deadline by `extra_seconds` (#831).
+/// Rejects when the window is not open, the extension is zero, or
+/// `MAX_EXTENSIONS` has already been reached for this claim.
+pub fn extend_claim_deadline(
+    env: &Env,
+    claim_id: &Symbol,
+    extra_seconds: u64,
+    now: u64,
+) -> Result<u64, ClaimError> {
+    if extra_seconds == 0 {
+        return Err(ClaimError::ZeroExtension);
+    }
+    if extra_seconds > MAX_WINDOW_S {
+        return Err(ClaimError::WindowTooLong);
+    }
+    let mut windows = window_map(env);
+    let mut window = windows.get(claim_id.clone()).ok_or(ClaimError::NotOpen)?;
+    match window.state {
+        ClaimState::Claimed => return Err(ClaimError::AlreadyClaimed),
+        ClaimState::Expired => return Err(ClaimError::AlreadyExpired),
+        ClaimState::Absent => return Err(ClaimError::NotOpen),
+        ClaimState::Open => {
+            if now > window.deadline {
+                return Err(ClaimError::AlreadyExpired);
+            }
+        }
+    }
+    if window.extensions >= MAX_EXTENSIONS {
+        return Err(ClaimError::ExtensionLimitReached);
+    }
+    let new_deadline = window.deadline.saturating_add(extra_seconds);
+    window.deadline = new_deadline;
+    window.extensions = window.extensions.saturating_add(1);
+    windows.set(claim_id.clone(), window);
+    env.storage().persistent().set(&WINDOW_MAP, &windows);
+    env.events()
+        .publish((EXTENDED, claim_id.clone()), new_deadline);
+    Ok(new_deadline)
 }
 
 pub fn expire_claim(env: &Env, claim_id: &Symbol, now: u64) -> Result<u64, ClaimError> {
@@ -461,4 +519,88 @@ mod tests {
             assert_eq!(env.events().all().len(), before + 1);
         });
     }
+
+    /// #830 — claim one ledger before, exactly at, and one after the deadline.
+    #[test]
+    fn exact_deadline_boundary_claims() {
+        let env = Env::default();
+        env.as_contract(&contract(&env), || {
+            let id = Symbol::new(&env, "BND1");
+            // opened_at=1000, window=100 → deadline=1100
+            open_claim_window(&env, &id, 1_000, 100, 10_000).expect("opened");
+
+            // one before deadline
+            assert!(is_claimable(&env, &id, 1_099));
+            claim(&env, &id, 1_000, 1_099).expect("claim before deadline");
+        });
+
+        env.as_contract(&contract(&env), || {
+            let id = Symbol::new(&env, "BND2");
+            open_claim_window(&env, &id, 1_000, 100, 10_000).expect("opened");
+            // exactly at deadline
+            assert!(is_claimable(&env, &id, 1_100));
+            claim(&env, &id, 1_000, 1_100).expect("claim at deadline");
+        });
+
+        env.as_contract(&contract(&env), || {
+            let id = Symbol::new(&env, "BND3");
+            open_claim_window(&env, &id, 1_000, 100, 10_000).expect("opened");
+            // one after deadline
+            assert!(!is_claimable(&env, &id, 1_101));
+            let result = claim(&env, &id, 1_000, 1_101);
+            assert_eq!(result.err(), Some(ClaimError::AlreadyExpired));
+        });
+    }
+
+    /// #829 — remaining_claim_time view reports countdown and zero after expiry.
+    #[test]
+    fn remaining_claim_time_view_reports_zero_after_expiry() {
+        let env = Env::default();
+        env.as_contract(&contract(&env), || {
+            let id = claim_id(&env);
+            open_claim_window(&env, &id, 1_000, 10_000, 10_000).expect("opened");
+            assert_eq!(remaining_claim_time(&env, &id, 1_000), 10_000);
+            assert_eq!(remaining_claim_time(&env, &id, 6_000), 5_000);
+            // exactly at deadline → zero remaining
+            assert_eq!(remaining_claim_time(&env, &id, 11_000), 0);
+            // after expiry
+            assert_eq!(remaining_claim_time(&env, &id, 11_001), 0);
+            // unknown claim
+            let missing = Symbol::new(&env, "NONE");
+            assert_eq!(remaining_claim_time(&env, &missing, 1_000), 0);
+        });
+    }
+
+    /// #831 — extensions are capped; further attempts are rejected.
+    #[test]
+    fn extension_beyond_max_count_is_rejected() {
+        let env = Env::default();
+        env.as_contract(&contract(&env), || {
+            let id = claim_id(&env);
+            open_claim_window(&env, &id, 1_000, 1_000, 10_000).expect("opened");
+            let d1 = extend_claim_deadline(&env, &id, 500, 1_100).expect("ext1");
+            assert_eq!(d1, 2_500);
+            let d2 = extend_claim_deadline(&env, &id, 500, 1_200).expect("ext2");
+            assert_eq!(d2, 3_000);
+            // MAX_EXTENSIONS == 2
+            let rejected = extend_claim_deadline(&env, &id, 500, 1_300);
+            assert_eq!(rejected.err(), Some(ClaimError::ExtensionLimitReached));
+            let window = claim_window(&env, &id).expect("window");
+            assert_eq!(window.extensions, MAX_EXTENSIONS);
+            assert_eq!(window.deadline, 3_000);
+        });
+    }
+
+    #[test]
+    fn zero_extension_is_rejected() {
+        let env = Env::default();
+        let result = env.as_contract(&contract(&env), || {
+            let id = claim_id(&env);
+            open_claim_window(&env, &id, 1_000, 1_000, 10_000).expect("opened");
+            extend_claim_deadline(&env, &id, 0, 1_100)
+        });
+        assert_eq!(result.err(), Some(ClaimError::ZeroExtension));
+    }
+
+
 }
