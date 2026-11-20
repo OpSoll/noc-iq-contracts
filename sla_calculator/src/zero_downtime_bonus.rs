@@ -10,6 +10,7 @@ pub enum BonusRejection {
     BonusBudgetDepleted,
     IncompleteWindow,
     InvalidMultiplier,
+    DuplicateResolution,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -55,6 +56,57 @@ pub fn evaluate_bonus(
     budget_remaining: i128,
     multiplier_bps: u32,
 ) -> Result<BonusAward, BonusRejection> {
+    evaluate_bonus_inner(
+        env,
+        operator,
+        None,
+        downtime_seconds,
+        window_seconds,
+        base_credit,
+        budget_remaining,
+        multiplier_bps,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn evaluate_bonus_for_resolution(
+    env: &Env,
+    operator: &Address,
+    resolution_id: &Symbol,
+    downtime_seconds: u64,
+    window_seconds: u64,
+    base_credit: i128,
+    budget_remaining: i128,
+    multiplier_bps: u32,
+) -> Result<BonusAward, BonusRejection> {
+    evaluate_bonus_inner(
+        env,
+        operator,
+        Some(resolution_id),
+        downtime_seconds,
+        window_seconds,
+        base_credit,
+        budget_remaining,
+        multiplier_bps,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn evaluate_bonus_inner(
+    env: &Env,
+    operator: &Address,
+    resolution_id: Option<&Symbol>,
+    downtime_seconds: u64,
+    window_seconds: u64,
+    base_credit: i128,
+    budget_remaining: i128,
+    multiplier_bps: u32,
+) -> Result<BonusAward, BonusRejection> {
+    if let Some(id) = resolution_id {
+        if crate::outage_correlation_tag::has_bonus_been_awarded(env, id) {
+            return Err(BonusRejection::DuplicateResolution);
+        }
+    }
     if multiplier_bps == 0 || multiplier_bps > MAX_MULTIPLIER_BPS {
         env.events()
             .publish((BONUS_DENIED, operator.clone()), multiplier_bps);
@@ -69,6 +121,12 @@ pub fn evaluate_bonus(
         env.events()
             .publish((BONUS_DENIED, operator.clone()), downtime_seconds);
         return Err(BonusRejection::IncompleteWindow);
+    }
+
+    if let Some(id) = resolution_id {
+        if !crate::outage_correlation_tag::mark_bonus_awarded(env, id) {
+            return Err(BonusRejection::DuplicateResolution);
+        }
     }
 
     let credit = cap_to_budget(scaled_credit(base_credit, multiplier_bps), budget_remaining);
@@ -275,6 +333,111 @@ mod accrual_tests {
                 evaluate_bonus(&env, &operator, 0, WINDOW, 1_000, 10_000, 20_001),
                 Err(BonusRejection::InvalidMultiplier)
             );
+        });
+    }
+}
+
+#[cfg(test)]
+mod resolution_dedup_tests {
+    use super::*;
+    use crate::outage_correlation_tag::has_bonus_been_awarded;
+    use crate::SLACalculatorContract;
+    use soroban_sdk::{testutils::Address as _, testutils::Events as _, Symbol};
+
+    const WINDOW: u64 = 2_592_000;
+
+    #[test]
+    fn one_resolution_pays_at_most_once_and_emits_one_event() {
+        let env = Env::default();
+        let id = env.register_contract(None, SLACalculatorContract);
+        let operator = Address::generate(&env);
+        let resolution = Symbol::new(&env, "RESOLVE1");
+        env.as_contract(&id, || {
+            let first = evaluate_bonus_for_resolution(
+                &env,
+                &operator,
+                &resolution,
+                0,
+                WINDOW,
+                1_000,
+                10_000,
+                10_000,
+            )
+            .unwrap();
+            let second = evaluate_bonus_for_resolution(
+                &env,
+                &operator,
+                &resolution,
+                0,
+                WINDOW,
+                1_000,
+                10_000 - first.credit,
+                10_000,
+            );
+            assert_eq!(second, Err(BonusRejection::DuplicateResolution));
+            assert!(has_bonus_been_awarded(&env, &resolution));
+            assert_eq!(env.events().all().len(), 1);
+        });
+    }
+
+    #[test]
+    fn a_distinct_eligible_resolution_is_still_awardable() {
+        let env = Env::default();
+        let id = env.register_contract(None, SLACalculatorContract);
+        let operator = Address::generate(&env);
+        let first = Symbol::new(&env, "RESOLVE1");
+        let second = Symbol::new(&env, "RESOLVE2");
+        env.as_contract(&id, || {
+            let a = evaluate_bonus_for_resolution(
+                &env, &operator, &first, 0, WINDOW, 1_000, 10_000, 10_000,
+            )
+            .unwrap();
+            let b = evaluate_bonus_for_resolution(
+                &env,
+                &operator,
+                &second,
+                0,
+                WINDOW,
+                1_000,
+                10_000 - a.credit,
+                10_000,
+            )
+            .unwrap();
+            assert_eq!((a.credit, b.credit), (1_000, 1_000));
+            assert_eq!(env.events().all().len(), 2);
+        });
+    }
+
+    #[test]
+    fn a_denied_resolution_does_not_consume_the_identifier() {
+        let env = Env::default();
+        let id = env.register_contract(None, SLACalculatorContract);
+        let operator = Address::generate(&env);
+        let resolution = Symbol::new(&env, "RESOLVE1");
+        env.as_contract(&id, || {
+            let denied = evaluate_bonus_for_resolution(
+                &env,
+                &operator,
+                &resolution,
+                30,
+                WINDOW,
+                1_000,
+                10_000,
+                10_000,
+            );
+            assert_eq!(denied, Err(BonusRejection::IncompleteWindow));
+            assert!(!has_bonus_been_awarded(&env, &resolution));
+            let awarded = evaluate_bonus_for_resolution(
+                &env,
+                &operator,
+                &resolution,
+                0,
+                WINDOW,
+                1_000,
+                10_000,
+                10_000,
+            );
+            assert_eq!(awarded.unwrap().credit, 1_000);
         });
     }
 }

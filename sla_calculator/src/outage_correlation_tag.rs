@@ -2,6 +2,7 @@ use soroban_sdk::{contracttype, symbol_short, Env, Map, Symbol, Vec};
 
 pub const CORRELATION_INDEX: Symbol = symbol_short!("corr_idx");
 pub const CHILD_INDEX: Symbol = symbol_short!("chd_idx");
+pub const BONUS_AWARDED_KEY: Symbol = symbol_short!("b_awrd");
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[contracttype]
@@ -171,6 +172,31 @@ pub fn aggregate_root_downtime(env: &Env, root: &Symbol) -> u64 {
     total
 }
 
+fn bonus_awarded(env: &Env) -> Map<Symbol, bool> {
+    env.storage()
+        .persistent()
+        .get(&BONUS_AWARDED_KEY)
+        .unwrap_or_else(|| Map::new(env))
+}
+
+pub fn has_bonus_been_awarded(env: &Env, resolution_id: &Symbol) -> bool {
+    bonus_awarded(env)
+        .get(resolution_id.clone())
+        .unwrap_or(false)
+}
+
+pub fn mark_bonus_awarded(env: &Env, resolution_id: &Symbol) -> bool {
+    let mut awarded = bonus_awarded(env);
+    if awarded.get(resolution_id.clone()).unwrap_or(false) {
+        return false;
+    }
+    awarded.set(resolution_id.clone(), true);
+    env.storage()
+        .persistent()
+        .set(&BONUS_AWARDED_KEY, &awarded);
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -289,6 +315,18 @@ mod tests {
         let env = Env::default();
         env.as_contract(&contract(&env), || {
             assert!(load_tag(&env, &id(&env, "OUT404")).is_none());
+        });
+    }
+
+    #[test]
+    fn a_resolution_bonus_can_only_be_claimed_once() {
+        let env = Env::default();
+        env.as_contract(&contract(&env), || {
+            let resolution = id(&env, "RESOLVE1");
+            assert!(!has_bonus_been_awarded(&env, &resolution));
+            assert!(mark_bonus_awarded(&env, &resolution));
+            assert!(has_bonus_been_awarded(&env, &resolution));
+            assert!(!mark_bonus_awarded(&env, &resolution));
         });
     }
 }

@@ -9877,3 +9877,64 @@ fn test_invalid_severity_symbol_rejected_on_calculate() {
     );
     assert!(result.is_err());
 }
+
+#[cfg(test)]
+mod vault_withdrawal_timing_tests {
+    use super::*;
+    use crate::vault_unbonding::{
+        request_unbonding, withdraw_unbonded, unbonding_for, UnbondingError,
+    };
+
+    #[test]
+    fn early_withdrawal_is_rejected_and_keeps_the_locked_amount() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 1_000);
+        let id = env.register_contract(None, SLACalculatorContract);
+        let operator = soroban_sdk::Address::generate(&env);
+        let tranche = symbol(&env, "tranche_a");
+
+        env.as_contract(&id, || {
+            let request = request_unbonding(&env, &operator, &tranche, 500);
+            env.ledger().with_mut(|l| l.timestamp = request.requested_at + 7 * 24 * 60 * 60 - 1);
+            assert_eq!(
+                withdraw_unbonded(&env, &operator, &tranche, 100),
+                Err(UnbondingError::NotUnlocked)
+            );
+            assert_eq!(unbonding_for(&env, &operator, &tranche).unwrap().amount, 500);
+        });
+    }
+}
+
+#[cfg(test)]
+mod sla_stats_overflow_tests {
+    use super::*;
+    use crate::sla_stats::{
+        get_stats, record_calculation, SLAStats as ModuleSLAStats, StatsError,
+    };
+
+    #[test]
+    fn a_rejected_update_preserves_every_stat_field() {
+        let env = Env::default();
+        let id = env.register_contract(None, SLACalculatorContract);
+        env.as_contract(&id, || {
+            let before = ModuleSLAStats {
+                total_calculations: u64::MAX,
+                met_count: 7,
+                violation_count: 3,
+                total_penalty: i128::MAX,
+            };
+            env.storage().instance().set(&symbol_short!("STATS2"), &before);
+
+            assert_eq!(
+                record_calculation(&env, false, 1),
+                Err(StatsError::TotalCalculationsOverflow)
+            );
+            let after = get_stats(&env);
+            assert_eq!(after.total_calculations, before.total_calculations);
+            assert_eq!(after.met_count, before.met_count);
+            assert_eq!(after.violation_count, before.violation_count);
+            assert_eq!(after.total_penalty, before.total_penalty);
+        });
+    }
+}

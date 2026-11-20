@@ -6,6 +6,7 @@ pub const PAYOUT: Symbol = symbol_short!("payout");
 pub const RELEASED: Symbol = symbol_short!("relzd");
 pub const BPS_DENOMINATOR: i128 = 10_000;
 pub const MAX_COVERAGE_BPS: u32 = 20_000;
+pub const PROTECTED_ASSET_KEY: Symbol = symbol_short!("passet");
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[contracttype]
@@ -267,6 +268,18 @@ pub fn total_locked(env: &Env) -> i128 {
         }
     }
     total
+}
+
+pub fn protect_accounting_asset(env: &Env, asset: &Address) {
+    env.storage().instance().set(&PROTECTED_ASSET_KEY, asset);
+}
+
+pub fn protected_asset(env: &Env) -> Option<Address> {
+    env.storage().instance().get(&PROTECTED_ASSET_KEY)
+}
+
+pub fn is_protected_asset(env: &Env, asset: &Address) -> bool {
+    protected_asset(env).as_ref() == Some(asset)
 }
 
 /// Conservation invariant: paid-out plus residual collateral equals the original lock.
@@ -562,6 +575,21 @@ mod tests {
             assert_eq!(listed.len(), 1);
             assert_eq!(listed.get(b.clone()), Some(600_000));
             assert_eq!(listed.get(a.clone()), None);
+        });
+    }
+
+    #[test]
+    fn the_protected_accounting_asset_is_distinguished_from_stray_tokens() {
+        let env = Env::default();
+        let id = env.register_contract(None, crate::SLACalculatorContract);
+        env.as_contract(&id, || {
+            let protected = contract(&env);
+            let stray = contract(&env);
+            assert!(!is_protected_asset(&env, &protected));
+            protect_accounting_asset(&env, &protected);
+            assert_eq!(protected_asset(&env), Some(protected.clone()));
+            assert!(is_protected_asset(&env, &protected));
+            assert!(!is_protected_asset(&env, &stray));
         });
     }
 }
