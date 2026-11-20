@@ -1,6 +1,6 @@
 #![no_std]
 
-use soroban_sdk::{symbol_short, Address, Env, Symbol};
+use soroban_sdk::{symbol_short, Address, BytesN, Env, Symbol};
 
 use crate::{SLAError, ADMIN_KEY};
 
@@ -8,6 +8,7 @@ use crate::{SLAError, ADMIN_KEY};
 // Storage keys
 // -----------------------------------------------------------------------
 const PROVENANCE_KEY: Symbol = symbol_short!("PROV");
+const COMMITTED_REVISION_KEY: Symbol = symbol_short!("PROVREV");
 
 // -----------------------------------------------------------------------
 // Events
@@ -21,11 +22,14 @@ const EVENT_VERSION: Symbol = symbol_short!("v1");
 
 /// Configuration provenance record.
 #[soroban_sdk::contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProvenanceRecord {
     /// Severity tier that was modified.
     pub severity: Symbol,
     /// Admin who made the change.
     pub changed_by: Address,
+    pub revision: u32,
+    pub digest: BytesN<32>,
     /// Timestamp of the change.
     pub changed_at: u64,
     /// Previous threshold value.
@@ -80,6 +84,8 @@ pub fn record_config_change(
     let record = ProvenanceRecord {
         severity: severity.clone(),
         changed_by: caller,
+        revision: 0,
+        digest: BytesN::from_array(env, &[0u8; 32]),
         changed_at: env.ledger().timestamp(),
         old_threshold,
         new_threshold,
@@ -107,6 +113,87 @@ pub fn record_config_change(
         (EVENT_PROV_REC, EVENT_VERSION, severity),
         (log.count,),
     );
+}
+
+pub fn committed_revision(env: &Env) -> u32 {
+    env.storage()
+        .instance()
+        .get(&COMMITTED_REVISION_KEY)
+        .unwrap_or(0)
+}
+
+pub fn record_committed_config_change(
+    env: &Env,
+    severity: &Symbol,
+    actor: &Address,
+    expected_revision: u32,
+    old_threshold: u32,
+    new_threshold: u32,
+    old_penalty: i128,
+    new_penalty: i128,
+    old_reward: i128,
+    new_reward: i128,
+    reason: soroban_sdk::String,
+) -> Result<ProvenanceRecord, SLAError> {
+    actor.require_auth();
+    let admin: Address = env
+        .storage()
+        .instance()
+        .get(&ADMIN_KEY)
+        .ok_or(SLAError::Unauthorized)?;
+    if *actor != admin {
+        return Err(SLAError::Unauthorized);
+    }
+    if expected_revision != committed_revision(env) {
+        return Err(SLAError::VersionMismatch);
+    }
+
+    let revision = expected_revision + 1;
+    let digest = crate::config_version_hash::compute_change_digest(
+        env,
+        actor,
+        revision,
+        severity,
+        old_threshold,
+        new_threshold,
+        old_penalty,
+        new_penalty,
+        old_reward,
+        new_reward,
+    );
+    let record = ProvenanceRecord {
+        severity: severity.clone(),
+        changed_by: actor.clone(),
+        revision,
+        digest: digest.clone(),
+        changed_at: env.ledger().timestamp(),
+        old_threshold,
+        new_threshold,
+        old_penalty,
+        new_penalty,
+        old_reward,
+        new_reward,
+        reason,
+    };
+
+    let mut log: ProvenanceLog = env
+        .storage()
+        .instance()
+        .get(&PROVENANCE_KEY)
+        .unwrap_or(ProvenanceLog {
+            records: soroban_sdk::Vec::new(env),
+            count: 0,
+        });
+    log.records.push_back(record.clone());
+    log.count = log.count.saturating_add(1);
+
+    env.storage().instance().set(&COMMITTED_REVISION_KEY, &revision);
+    env.storage().instance().set(&PROVENANCE_KEY, &log);
+    env.events().publish(
+        (EVENT_PROV_REC, EVENT_VERSION, severity.clone()),
+        (revision, log.count),
+    );
+    Ok(record)
 }
 
 /// Get the full provenance log.
@@ -223,4 +310,122 @@ pub fn get_changes_by_admin(
     }
 
     Ok(filtered)
+}
+
+#[cfg(test)]
+mod committed_revision_tests {
+    use super::*;
+    use crate::SLACalculatorContract;
+    use soroban_sdk::{symbol_short, testutils::Address as _, String};
+
+    fn setup() -> (Env, soroban_sdk::Address, Address) {
+        let env = Env::default();
+        env.mock_all_auths();
+        let id = env.register_contract(None, SLACalculatorContract);
+        let admin = Address::generate(&env);
+        env.as_contract(&id, || {
+            env.storage().instance().set(&ADMIN_KEY, &admin);
+        });
+        (env, id, admin)
+    }
+
+    fn reason(env: &Env) -> String {
+        String::from_str(env, "reviewed")
+    }
+
+    #[test]
+    fn rejected_update_creates_no_provenance_entry() {
+        let (env, id, admin) = setup();
+        env.as_contract(&id, || {
+            let result = record_committed_config_change(
+                &env,
+                &symbol_short!("critical"),
+                &admin,
+                1,
+                15,
+                30,
+                10,
+                20,
+                100,
+                200,
+                reason(&env),
+            );
+
+            assert_eq!(result, Err(SLAError::VersionMismatch));
+            assert_eq!(get_change_count(&env), Ok(0));
+            assert_eq!(committed_revision(&env), 0);
+        });
+    }
+
+    #[test]
+    fn committed_update_records_actor_revision_and_digest() {
+        let (env, id, admin) = setup();
+        env.as_contract(&id, || {
+            let severity = symbol_short!("critical");
+            let record = record_committed_config_change(
+                &env,
+                &severity,
+                &admin,
+                0,
+                15,
+                30,
+                10,
+                20,
+                100,
+                200,
+                reason(&env),
+            )
+            .expect("current revision is accepted");
+
+            let expected_digest = crate::config_version_hash::compute_change_digest(
+                &env, &admin, 1, &severity, 15, 30, 10, 20, 100, 200,
+            );
+            assert_eq!(record.changed_by, admin);
+            assert_eq!(record.revision, 1);
+            assert_eq!(record.digest, expected_digest);
+            assert_eq!(committed_revision(&env), 1);
+            assert_eq!(get_change_count(&env), Ok(1));
+            assert_eq!(get_latest_change(&env, &severity), Ok(Some(record)));
+        });
+    }
+
+    #[test]
+    fn a_second_commit_advances_the_revision_and_keeps_both_entries() {
+        let (env, id, admin) = setup();
+        env.as_contract(&id, || {
+            let severity = symbol_short!("critical");
+            record_committed_config_change(
+                &env,
+                &severity,
+                &admin,
+                0,
+                15,
+                30,
+                10,
+                20,
+                100,
+                200,
+                reason(&env),
+            )
+            .unwrap();
+            let second = record_committed_config_change(
+                &env,
+                &severity,
+                &admin,
+                1,
+                30,
+                45,
+                20,
+                30,
+                200,
+                300,
+                reason(&env),
+            )
+            .unwrap();
+
+            assert_eq!(second.revision, 2);
+            assert_eq!(get_change_count(&env), Ok(2));
+            assert_eq!(get_severity_provenance(&env, &severity).map(|records| records.len()), Ok(2));
+        });
+    }
 }
