@@ -242,6 +242,26 @@ pub fn validate_serialized_payload_size(size: u32) -> Result<(), PayloadSizeErro
     Ok(())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EventFamily {
+    Config,
+    Calculation,
+}
+
+pub const MIXED_EVENT_ORDER_RULE: &str =
+    "config events first, then calculation events; stable order within each family";
+
+pub fn family_rank(family: EventFamily) -> u32 {
+    match family {
+        EventFamily::Config => 0,
+        EventFamily::Calculation => 1,
+    }
+}
+
+pub fn family_precedes(a: EventFamily, b: EventFamily) -> bool {
+    family_rank(a) < family_rank(b)
+}
+
 #[cfg(test)]
 mod tests {
     extern crate alloc;

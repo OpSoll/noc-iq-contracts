@@ -39,6 +39,23 @@ report lists the exact source version, target version and upgrade path.
 - New error variants must be appended to the end of the enum
 - Event schema changes must emit a new event version symbol
 
+## Config Schema Compatibility Categories
+
+`check_schema_compatibility` in `sla_calculator/src/config_compatibility_check.rs` returns a
+`ConfigCompatibilityResult` with a stable `CompatibilityCategory` and the `field_path` that caused
+the result:
+
+| Change | Category | Compatible |
+|---|---|---|
+| No relevant change | `Compatible` | yes |
+| Optional field added | `OptionalAddition` | yes |
+| Required field added | `BreakingAddition` | no |
+| Required field removed | `BreakingRemoval` | no |
+| Field type changed | `IncompatibleType` | no |
+
+Breaking findings take precedence over optional additions when a fixture contains both. The
+existing version-based `check_config_compatibility` still reports `CompatibilityStatus` to clients.
+
 ## Supported Legacy Decode Window
 
 How far back the current contract binary and the off-chain consumers can still read, and what

@@ -14,11 +14,21 @@ mod tests;
 #[cfg(test)]
 mod batch_downtime_tests;
 
+#[cfg(test)]
+mod batch_test;
+
+#[cfg(test)]
+mod proptests;
+
 pub mod adaptive_tuning;
+pub mod admin_query;
+pub mod admin_transfer;
+pub mod admin_renounce;
 pub mod storage_version;
 pub mod submission_rate;
 pub mod symbol_constants;
 pub mod batch;
+pub mod batch_optimized;
 pub mod breach_escalation;
 pub mod claim_deadline;
 pub mod unpause;
@@ -60,6 +70,11 @@ pub mod version_discovery;
 pub mod whitelist;
 pub mod zero_downtime_bonus;
 pub mod event_ordering_tests;
+pub mod config;
+pub mod config_bundle;
+pub mod config_bundle_atomic_update;
+pub mod config_compatibility_check;
+pub mod init_guard;
 // -----------------------------------------------------------------------
 // Storage keys
 // -----------------------------------------------------------------------
@@ -404,36 +419,40 @@ impl SLACalculatorContract {
     /// `admin`    – may update config, pause/unpause, and assign the operator.
     /// `operator` – may call `calculate_sla`.
     pub fn initialize(env: Env, admin: Address, operator: Address) -> Result<(), SLAError> {
-        if env.storage().instance().has(&ADMIN_KEY) {
-            return Err(SLAError::AlreadyInitialized);
-        }
-
-        env.storage().instance().set(&ADMIN_KEY, &admin);
-        env.storage().instance().set(&OPERATOR_KEY, &operator); // #28
-        env.storage().instance().set(&PAUSED_KEY, &false); // #27
-
-        // #29 – initialise zeroed stats
-        env.storage().instance().set(
-            &STATS_KEY,
-            &SLAStats {
-                total_calculations: 0,
-                total_violations: 0,
-                total_rewards: 0,
-                total_penalties: 0,
-            },
-        );
-        env.storage()
-            .instance()
-            .set(&HISTORY_KEY, &Vec::<SLAResult>::new(&env));
-        env.storage()
-            .instance()
-            .set(&INIT_TIME_KEY, &env.ledger().timestamp());
-
         let configs = Self::initialize_default_configs(&env);
+        let stats = SLAStats {
+            total_calculations: 0,
+            total_violations: 0,
+            total_rewards: 0,
+            total_penalties: 0,
+        };
+        let history = Vec::<SLAResult>::new(&env);
+        let initialized_at = env.ledger().timestamp();
 
-        env.storage().instance().set(&CONFIG_KEY, &configs);
-        Self::write_version(&env);
-        Ok(())
+        init_guard::run_initialization(&env, |storage_env, key| {
+            if key == ADMIN_KEY {
+                storage_env.storage().instance().set(&key, &admin);
+            } else if key == OPERATOR_KEY {
+                storage_env.storage().instance().set(&key, &operator);
+            } else if key == PAUSED_KEY {
+                storage_env.storage().instance().set(&key, &false);
+            } else if key == STATS_KEY {
+                storage_env.storage().instance().set(&key, &stats);
+            } else if key == HISTORY_KEY {
+                storage_env.storage().instance().set(&key, &history);
+            } else if key == INIT_TIME_KEY {
+                storage_env.storage().instance().set(&key, &initialized_at);
+            } else if key == CONFIG_KEY {
+                storage_env.storage().instance().set(&key, &configs);
+            } else if key == STORAGE_VERSION_KEY {
+                Self::write_version(storage_env);
+            }
+            Ok::<(), init_guard::InitError>(())
+        })
+        .map_err(|error| match error {
+            init_guard::InitError::AlreadyInitialized => SLAError::AlreadyInitialized,
+            _ => SLAError::NotInitialized,
+        })
     }
 
     // -------------------------------------------------------------------
@@ -1341,6 +1360,7 @@ impl SLACalculatorContract {
         Self::check_version(&env)?;
         // Validate batch inputs before processing
         crate::batch::validate_batch(&env, &requests)?;
+        crate::batch::validate_xdr_budget(&env, &requests)?;
 
         // Bypass all authorization and pause checks to allow public verification
         let configs: soroban_sdk::Map<Symbol, SLAConfig> = env
@@ -3027,5 +3047,32 @@ mod outage_cap_tests {
         let view_res =
             client.calculate_sla_view(&symbol_short!("OUT_V"), &symbol_short!("high"), &3_000);
         assert_eq!(view_res.mttr_minutes, 1_000);
+    }
+}
+
+#[cfg(test)]
+mod initialization_guard_tests {
+    use super::*;
+    use soroban_sdk::testutils::Address as _;
+
+    #[test]
+    fn initialize_resumes_from_partial_state_and_then_reports_already_initialized() {
+        let env = Env::default();
+        let id = env.register_contract(None, SLACalculatorContract);
+        let admin = Address::generate(&env);
+        let operator = Address::generate(&env);
+
+        env.as_contract(&id, || {
+            env.storage().instance().set(&ADMIN_KEY, &admin);
+        });
+
+        let client = SLACalculatorContractClient::new(&env, &id);
+        client.initialize(&admin, &operator);
+        assert_eq!(client.get_admin(), admin);
+        assert_eq!(client.get_operator(), operator);
+        assert_eq!(
+            client.try_initialize(&admin, &operator).unwrap_err().unwrap(),
+            SLAError::AlreadyInitialized
+        );
     }
 }

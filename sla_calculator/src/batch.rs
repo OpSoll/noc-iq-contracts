@@ -1,3 +1,4 @@
+use soroban_sdk::xdr::ToXdr;
 use soroban_sdk::{contracttype, symbol_short, Env, Symbol};
 
 use crate::{SLAConfig, SLAError, SLAResult, CONFIG_KEY, OPERATOR_KEY};
@@ -7,6 +8,13 @@ use crate::{SLAConfig, SLAError, SLAResult, CONFIG_KEY, OPERATOR_KEY};
 // -----------------------------------------------------------------------
 const EVENT_BATCH_CALC: Symbol = symbol_short!("btch_calc");
 const EVENT_VERSION: Symbol = symbol_short!("v1");
+
+pub const XDR_BATCH_ITEM_LIMIT: u32 = 50;
+pub const XDR_BATCH_BYTE_BUDGET: u32 = 64 * 1024;
+const BATCH_ITEM_HISTORY_KEY: Symbol = symbol_short!("PBHIST");
+const BATCH_ITEM_STATS_KEY: Symbol = symbol_short!("PBSTATS");
+const OPTIMIZED_HISTORY_KEY: Symbol = symbol_short!("OPHIST");
+const OPTIMIZED_COUNT_KEY: Symbol = symbol_short!("OPCOUNT");
 
 // -----------------------------------------------------------------------
 // Types
@@ -80,6 +88,7 @@ pub fn batch_calculate(
 ) -> Result<(BatchSummary, soroban_sdk::Vec<BatchResult>), SLAError> {
     // Validate batch size and contents before processing
     validate_batch(env, &requests)?;
+    validate_xdr_budget(env, &requests)?;
 
     // Verify operator role
     let operator: soroban_sdk::Address = env
@@ -390,4 +399,218 @@ pub fn find_result_by_outage_id(
         }
     }
     None
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BatchItemInput {
+    pub id: u64,
+    pub value: u64,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BatchItemOutput {
+    pub id: u64,
+    pub result: u64,
+    pub error: Option<Symbol>,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BatchProcessResult {
+    pub results: soroban_sdk::Vec<BatchItemOutput>,
+    pub processed_count: u32,
+    pub has_failed: bool,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BatchProcessStats {
+    pub processed: u32,
+    pub failed: u32,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BatchItemError {
+    pub code: Symbol,
+    pub index: u32,
+}
+
+pub struct BatchCalculator;
+
+impl BatchCalculator {
+    pub fn process_batch(
+        env: &Env,
+        items: soroban_sdk::Vec<BatchItemInput>,
+        strict_mode: bool,
+    ) -> Result<BatchProcessResult, BatchItemError> {
+        if items.len() > XDR_BATCH_ITEM_LIMIT {
+            return Err(BatchItemError {
+                code: Symbol::new(env, "BatchXdrBudgetExceeded"),
+                index: XDR_BATCH_ITEM_LIMIT,
+            });
+        }
+
+        let mut results = soroban_sdk::Vec::with_capacity(env, items.len());
+        let mut failed = 0u32;
+        for i in 0..items.len() {
+            let item = items.get(i).unwrap();
+            if item.value == 0 {
+                let code = if strict_mode {
+                    Symbol::new(env, "InvalidItemStrictAbort")
+                } else {
+                    Symbol::new(env, "InvalidItem")
+                };
+                if strict_mode {
+                    return Err(BatchItemError { code, index: i });
+                }
+                failed = failed.saturating_add(1);
+                results.push_back(BatchItemOutput {
+                    id: item.id,
+                    result: 0,
+                    error: Some(code),
+                });
+            } else {
+                results.push_back(BatchItemOutput {
+                    id: item.id,
+                    result: item.value.saturating_mul(2),
+                    error: None,
+                });
+            }
+        }
+
+        Ok(BatchProcessResult {
+            results,
+            processed_count: items.len(),
+            has_failed: failed > 0,
+        })
+    }
+
+    pub fn process_batch_with_commit(
+        env: &Env,
+        items: soroban_sdk::Vec<BatchItemInput>,
+        strict_mode: bool,
+    ) -> Result<BatchProcessResult, BatchItemError> {
+        let result = Self::process_batch(env, items, strict_mode)?;
+        let stats = BatchProcessStats {
+            processed: result.processed_count,
+            failed: result.results.iter().filter(|item| item.error.is_some()).count() as u32,
+        };
+        env.storage()
+            .instance()
+            .set(&BATCH_ITEM_HISTORY_KEY, &result.results);
+        env.storage().instance().set(&BATCH_ITEM_STATS_KEY, &stats);
+        Ok(result)
+    }
+}
+
+pub struct BatchResultAdapter;
+
+impl BatchResultAdapter {
+    pub fn create_error_vector(env: &Env, error: Option<Symbol>) -> soroban_sdk::Vec<Symbol> {
+        let mut errors = soroban_sdk::Vec::new(env);
+        if let Some(code) = error {
+            errors.push_back(code);
+        }
+        errors
+    }
+}
+
+pub fn validate_xdr_budget(
+    env: &Env,
+    requests: &soroban_sdk::Vec<BatchRequest>,
+) -> Result<u32, SLAError> {
+    if requests.len() > XDR_BATCH_ITEM_LIMIT {
+        return Err(SLAError::ThresholdOutOfBounds);
+    }
+    let encoded = requests.clone().to_xdr(env);
+    if encoded.len() > XDR_BATCH_BYTE_BUDGET {
+        return Err(SLAError::ThresholdOutOfBounds);
+    }
+    Ok(requests.len())
+}
+
+pub fn batch_process_history(env: &Env) -> soroban_sdk::Vec<BatchItemOutput> {
+    env.storage()
+        .instance()
+        .get(&BATCH_ITEM_HISTORY_KEY)
+        .unwrap_or_else(|| soroban_sdk::Vec::new(env))
+}
+
+pub fn batch_process_stats(env: &Env) -> BatchProcessStats {
+    env.storage()
+        .instance()
+        .get(&BATCH_ITEM_STATS_KEY)
+        .unwrap_or(BatchProcessStats {
+            processed: 0,
+            failed: 0,
+        })
+}
+
+pub fn process_reference_batch(
+    env: &Env,
+    items: &soroban_sdk::Vec<crate::batch_optimized::OptimizedBatchItem>,
+) -> soroban_sdk::Vec<crate::batch_optimized::OptimizedBatchItem> {
+    let mut results = soroban_sdk::Vec::new(env);
+    for item in items.iter() {
+        results.push_back(crate::batch_optimized::OptimizedBatchItem {
+            id: item.id,
+            score: item.score.saturating_mul(2),
+        });
+    }
+    results
+}
+
+pub fn process_reference_batch_with_effects(
+    env: &Env,
+    items: &soroban_sdk::Vec<crate::batch_optimized::OptimizedBatchItem>,
+) -> soroban_sdk::Vec<crate::batch_optimized::OptimizedBatchItem> {
+    let results = process_reference_batch(env, items);
+    commit_optimized_results(env, &results);
+    results
+}
+
+pub fn commit_optimized_results(
+    env: &Env,
+    results: &soroban_sdk::Vec<crate::batch_optimized::OptimizedBatchItem>,
+) {
+    let mut history: soroban_sdk::Vec<crate::batch_optimized::OptimizedBatchItem> = env
+        .storage()
+        .instance()
+        .get(&OPTIMIZED_HISTORY_KEY)
+        .unwrap_or_else(|| soroban_sdk::Vec::new(env));
+    for item in results.iter() {
+        history.push_back(item);
+    }
+    env.storage()
+        .instance()
+        .set(&OPTIMIZED_HISTORY_KEY, &history);
+    let count: u32 = env
+        .storage()
+        .instance()
+        .get(&OPTIMIZED_COUNT_KEY)
+        .unwrap_or(0);
+    env.storage()
+        .instance()
+        .set(&OPTIMIZED_COUNT_KEY, &count.saturating_add(results.len()));
+}
+
+pub fn optimized_batch_effects(
+    env: &Env,
+) -> (
+    soroban_sdk::Vec<crate::batch_optimized::OptimizedBatchItem>,
+    u32,
+) {
+    let history = env
+        .storage()
+        .instance()
+        .get(&OPTIMIZED_HISTORY_KEY)
+        .unwrap_or_else(|| soroban_sdk::Vec::new(env));
+    let count = env
+        .storage()
+        .instance()
+        .get(&OPTIMIZED_COUNT_KEY)
+        .unwrap_or(0u32);
+    (history, count)
 }

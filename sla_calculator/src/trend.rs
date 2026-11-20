@@ -49,6 +49,7 @@ pub enum OperatorTier {
 
 /// SLA trend data for a specific time period.
 #[soroban_sdk::contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TrendData {
     /// Start timestamp of the period.
     pub period_start: u64,
@@ -72,6 +73,7 @@ pub struct TrendData {
 
 /// Aggregated trend summary across multiple periods.
 #[soroban_sdk::contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TrendSummary {
     /// Overall compliance rate across all periods.
     pub overall_compliance_bps: u32,
@@ -89,6 +91,53 @@ pub struct TrendSummary {
 // Functions
 // -----------------------------------------------------------------------
 
+pub fn empty_trend_data(period_start: u64, period_end: u64) -> TrendData {
+    TrendData {
+        period_start,
+        period_end: period_end.max(period_start),
+        calculation_count: 0,
+        violation_count: 0,
+        compliance_rate_bps: 0,
+        avg_mttr_minutes: 0,
+        total_rewards: 0,
+        total_penalties: 0,
+        net_amount: 0,
+    }
+}
+
+pub fn empty_trend_summary(bucket_count: u32) -> TrendSummary {
+    TrendSummary {
+        overall_compliance_bps: 0,
+        overall_avg_mttr: 0,
+        total_calculations: 0,
+        trend_direction: 0,
+        period_count: bucket_count,
+    }
+}
+
+pub fn bucket_boundaries(
+    env: &Env,
+    from_timestamp: u64,
+    to_timestamp: u64,
+    bucket_count: u32,
+) -> soroban_sdk::Vec<(u64, u64)> {
+    let mut boundaries = soroban_sdk::Vec::new(env);
+    if bucket_count == 0 || to_timestamp <= from_timestamp {
+        return boundaries;
+    }
+    let bucket_duration = (to_timestamp - from_timestamp) / bucket_count as u64;
+    for i in 0..bucket_count {
+        let start = from_timestamp + i as u64 * bucket_duration;
+        let end = if i == bucket_count - 1 {
+            to_timestamp
+        } else {
+            start + bucket_duration
+        };
+        boundaries.push_back((start, end));
+    }
+    boundaries
+}
+
 /// Calculate SLA trend for a specific time window.
 ///
 /// Returns aggregated metrics for all calculations within the time range.
@@ -104,6 +153,10 @@ pub fn calculate_trend(
     from_timestamp: u64,
     to_timestamp: u64,
 ) -> Result<TrendData, SLAError> {
+    if to_timestamp < from_timestamp {
+        return Ok(empty_trend_data(from_timestamp, to_timestamp));
+    }
+
     let history: soroban_sdk::Vec<SLAResult> = env
         .storage()
         .instance()
@@ -133,6 +186,10 @@ pub fn calculate_trend(
         } else {
             total_rewards = total_rewards.saturating_add(entry.amount);
         }
+    }
+
+    if calculation_count == 0 {
+        return Ok(empty_trend_data(from_timestamp, to_timestamp));
     }
 
     // Calculate compliance rate (basis points)
@@ -184,9 +241,9 @@ pub fn calculate_trend_summary(
     if bucket_count == 0 {
         return Err(SLAError::InvalidThreshold);
     }
-
-    let duration = to_timestamp.saturating_sub(from_timestamp);
-    let bucket_duration = duration / bucket_count as u64;
+    if to_timestamp <= from_timestamp {
+        return Ok(empty_trend_summary(bucket_count));
+    }
 
     let mut total_calculations: u32 = 0;
     let mut total_compliance: u64 = 0;
@@ -195,14 +252,9 @@ pub fn calculate_trend_summary(
     let mut prev_compliance: i64 = -1;
     let mut trend_sum: i64 = 0;
 
-    for i in 0..bucket_count {
-        let bucket_start = from_timestamp + (i as u64 * bucket_duration);
-        let bucket_end = if i == bucket_count - 1 {
-            to_timestamp
-        } else {
-            bucket_start + bucket_duration
-        };
-
+    for (bucket_start, bucket_end) in
+        bucket_boundaries(env, from_timestamp, to_timestamp, bucket_count).iter()
+    {
         let trend = calculate_trend(env, bucket_start, bucket_end)?;
 
         total_calculations = total_calculations.saturating_add(trend.calculation_count);
@@ -254,17 +306,7 @@ pub fn get_recent_trend(env: &Env, lookback_count: u32) -> Result<TrendData, SLA
 
     let len = history.len();
     if len == 0 {
-        return Ok(TrendData {
-            period_start: 0,
-            period_end: 0,
-            calculation_count: 0,
-            violation_count: 0,
-            compliance_rate_bps: 0,
-            avg_mttr_minutes: 0,
-            total_rewards: 0,
-            total_penalties: 0,
-            net_amount: 0,
-        });
+        return Ok(empty_trend_data(0, 0));
     }
 
     let start_idx = len.saturating_sub(lookback_count);
@@ -859,6 +901,76 @@ mod window_aggregation_tests {
 
             seed(&env, &[(true, 10, 10), (true, 10, 190)]);
             assert_eq!(get_latest_trend_direction(&env, 2), Ok(0));
+        });
+    }
+
+    #[test]
+    fn test_empty_window_returns_the_documented_structure() {
+        let env = Env::default();
+        let id = env.register_contract(None, SLACalculatorContract);
+        env.as_contract(&id, || {
+            seed(&env, &[(true, 10, 100)]);
+            let empty = calculate_trend(&env, 200, 300).unwrap();
+            assert_eq!(empty.period_start, 200);
+            assert_eq!(empty.period_end, 300);
+            assert_eq!(empty.calculation_count, 0);
+            assert_eq!(empty.violation_count, 0);
+            assert_eq!(empty.compliance_rate_bps, 0);
+            assert_eq!(empty.avg_mttr_minutes, 0);
+            assert_eq!(empty.total_rewards, 0);
+            assert_eq!(empty.total_penalties, 0);
+            assert_eq!(empty.net_amount, 0);
+        });
+    }
+
+    #[test]
+    fn test_future_only_range_returns_the_documented_structure() {
+        let env = Env::default();
+        let id = env.register_contract(None, SLACalculatorContract);
+        env.as_contract(&id, || {
+            seed(&env, &[(true, 10, 100)]);
+            let trend = calculate_trend(&env, 300, 200).unwrap();
+            assert_eq!(trend, empty_trend_data(300, 200));
+            assert_eq!(trend.period_end, 300);
+
+            let summary = calculate_trend_summary(&env, 300, 200, 3).unwrap();
+            assert_eq!(summary, empty_trend_summary(3));
+            assert_eq!(summary.period_count, 3);
+            assert_eq!(summary.trend_direction, 0);
+        });
+    }
+
+    #[test]
+    fn test_bucket_boundaries_are_deterministic_and_contiguous() {
+        let env = Env::default();
+        let boundaries = bucket_boundaries(&env, 100, 500, 4);
+        assert_eq!(boundaries.len(), 4);
+        assert_eq!(boundaries.get(0), Some((100, 200)));
+        assert_eq!(boundaries.get(1), Some((200, 300)));
+        assert_eq!(boundaries.get(2), Some((300, 400)));
+        assert_eq!(boundaries.get(3), Some((400, 500)));
+        assert_eq!(boundaries, bucket_boundaries(&env, 100, 500, 4));
+
+        let mut previous_end = 100;
+        for (start, end) in boundaries.iter() {
+            assert_eq!(start, previous_end);
+            assert!(end >= start);
+            previous_end = end;
+        }
+        assert_eq!(previous_end, 500);
+        assert_eq!(bucket_boundaries(&env, 500, 100, 2).len(), 0);
+    }
+
+    #[test]
+    fn test_empty_summary_is_stable_for_an_empty_range() {
+        let env = Env::default();
+        let id = env.register_contract(None, SLACalculatorContract);
+        env.as_contract(&id, || {
+            seed(&env, &[(true, 10, 100)]);
+            let first = calculate_trend_summary(&env, 200, 200, 5).unwrap();
+            let second = calculate_trend_summary(&env, 200, 200, 5).unwrap();
+            assert_eq!(first, second);
+            assert_eq!(first, empty_trend_summary(5));
         });
     }
 }

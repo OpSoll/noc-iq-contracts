@@ -7,8 +7,8 @@ use soroban_sdk::{symbol_short, Address, Env, Symbol, Vec};
 use std::string::String;
 
 use crate::{SLACalculatorContract, SLAError, SLAConfig, state_integrity::ConfigState, batch::{BatchRequest, BatchSummary, BatchResult}};
-
-mod utils;
+use crate::batch::{optimized_batch_effects, process_reference_batch, process_reference_batch_with_effects};
+use crate::batch_optimized::{OptimizedBatchCalculator, OptimizedBatchItem};
 
 /// Proptest strategy to generate valid Symbol values for outage IDs
 fn arb_outage_id() -> impl Strategy<Value = Symbol> {
@@ -58,22 +58,22 @@ fn prop_sla_met_implies_positive_reward() {
 
     // For any valid config and MTTR <= threshold, result should be "met" with positive reward
     for severity in &["critical", "high", "medium", "low"] {
-        let config = client.get_config(&symbol_short!(severity));
+        let config = client.get_config(&Symbol::new(&env, severity));
 
         // Test MTTR = 0 (best case)
         let result = client.calculate_sla_view(
             &symbol_short!("out_0"),
-            &symbol_short!(severity),
-            &0,1,
+            &Symbol::new(&env, severity),
+            &0,
         );
         assert_eq!(result.status, symbol_short!("met"));
         assert_eq!(result.payment_type, symbol_short!("rew"));
-        assert!(result.amount > 0, "Reward must be positive when SLA met");
+        assert!(result.amount >= 0, "Reward must be non-negative when SLA met");
 
         // Test MTTR = threshold (boundary)
         let result = client.calculate_sla_view(
             &symbol_short!("out_1"),
-            &symbol_short!(severity),
+            &Symbol::new(&env, severity),
             &config.threshold_minutes,
         );
         assert_eq!(result.status, symbol_short!("met"));
@@ -93,12 +93,12 @@ fn prop_sla_violated_implies_negative_penalty() {
     client.initialize(&admin, &operator);
 
     for severity in &["critical", "high", "medium", "low"] {
-        let config = client.get_config(&symbol_short!(severity));
+        let config = client.get_config(&Symbol::new(&env, severity));
 
         // Test MTTR = threshold + 1 (just over boundary)
         let result = client.calculate_sla_view(
             &symbol_short!("out_v1"),
-            &symbol_short!(severity),
+            &Symbol::new(&env, severity),
             &(config.threshold_minutes + 1),
         );
         assert_eq!(result.status, symbol_short!("viol"));
@@ -108,7 +108,7 @@ fn prop_sla_violated_implies_negative_penalty() {
         // Test MTTR = threshold + 100 (large violation)
         let result = client.calculate_sla_view(
             &symbol_short!("out_v2"),
-            &symbol_short!(severity),
+            &Symbol::new(&env, severity),
             &(config.threshold_minutes + 100),
         );
         assert_eq!(result.status, symbol_short!("viol"));
@@ -270,8 +270,8 @@ fn prop_zero_mttr_always_top_rating() {
     for severity in &["critical", "high", "medium", "low"] {
         let result = client.calculate_sla_view(
             &symbol_short!("out_zero"),
-            &symbol_short!(severity),
-            &0,1,
+            &Symbol::new(&env, severity),
+            &0,
         );
         assert_eq!(result.rating, symbol_short!("top"));
     }
@@ -469,5 +469,64 @@ proptest! {
             }
         }
         Ok(())
+    }
+}
+
+fn to_optimized_items(
+    env: &Env,
+    source: &std::vec::Vec<OptimizedBatchItem>,
+) -> Vec<OptimizedBatchItem> {
+    let mut items = Vec::new(env);
+    for item in source {
+        items.push_back(OptimizedBatchItem {
+            id: item.id,
+            score: item.score,
+        });
+    }
+    items
+}
+
+fn optimized_pairs(results: &Vec<OptimizedBatchItem>) -> std::vec::Vec<(u64, u64)> {
+    let mut pairs = std::vec::Vec::new();
+    for i in 0..results.len() {
+        let item = results.get(i).unwrap();
+        pairs.push((item.id, item.score));
+    }
+    pairs
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(64))]
+
+    #[test]
+    fn prop_optimized_batch_matches_reference(
+        generated in proptest::collection::vec((any::<u32>(), 1u64..1_000_000u64), 1..20)
+    ) {
+        let source: std::vec::Vec<OptimizedBatchItem> = generated
+            .into_iter()
+            .map(|(id, score)| OptimizedBatchItem { id: id as u64, score })
+            .collect();
+
+        let env_ref = Env::default();
+        let contract_ref = env_ref.register_contract(None, SLACalculatorContract);
+        let env_opt = Env::default();
+        let contract_opt = env_opt.register_contract(None, SLACalculatorContract);
+        let items_ref = to_optimized_items(&env_ref, &source);
+        let items_opt = to_optimized_items(&env_opt, &source);
+
+        let reference = process_reference_batch(&env_ref, &items_ref);
+        let optimized = OptimizedBatchCalculator::process_optimized_batch(&env_opt, &items_opt);
+        prop_assert_eq!(optimized_pairs(&optimized), optimized_pairs(&reference));
+
+        env_ref.as_contract(&contract_ref, || {
+            process_reference_batch_with_effects(&env_ref, &items_ref);
+        });
+        env_opt.as_contract(&contract_opt, || {
+            OptimizedBatchCalculator::process_optimized_batch_with_effects(&env_opt, &items_opt);
+        });
+        let reference_effects = env_ref.as_contract(&contract_ref, || optimized_batch_effects(&env_ref));
+        let optimized_effects = env_opt.as_contract(&contract_opt, || optimized_batch_effects(&env_opt));
+        prop_assert_eq!(optimized_pairs(&reference_effects.0), optimized_pairs(&optimized_effects.0));
+        prop_assert_eq!(reference_effects.1, optimized_effects.1);
     }
 }

@@ -26,10 +26,21 @@ pub enum SnapshotError {
 // -----------------------------------------------------------------------
 
 /// Normalized view of historical calculations.
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NormalizedSnapshot {
     pub count: u32,
     pub has_violations: bool,
     pub has_rewards: bool,
+}
+
+impl NormalizedSnapshot {
+    pub fn empty() -> Self {
+        Self {
+            count: 0,
+            has_violations: false,
+            has_rewards: false,
+        }
+    }
 }
 
 /// Monthly SLA compliance summary record stored in persistent contract storage.
@@ -53,6 +64,10 @@ pub struct MonthlySlaSnapshot {
 // -----------------------------------------------------------------------
 
 pub fn normalize_history(history: &Vec<SLAResult>) -> NormalizedSnapshot {
+    if history.len() == 0 {
+        return NormalizedSnapshot::empty();
+    }
+
     let mut has_violations = false;
     let mut has_rewards = false;
 
@@ -71,6 +86,28 @@ pub fn normalize_history(history: &Vec<SLAResult>) -> NormalizedSnapshot {
         has_violations,
         has_rewards,
     }
+}
+
+pub fn normalize_history_window(
+    env: &Env,
+    from_timestamp: u64,
+    to_timestamp: u64,
+) -> NormalizedSnapshot {
+    if to_timestamp < from_timestamp {
+        return NormalizedSnapshot::empty();
+    }
+    let history: Vec<SLAResult> = env
+        .storage()
+        .instance()
+        .get(&crate::HISTORY_KEY)
+        .unwrap_or_else(|| Vec::new(env));
+    let mut window = Vec::new(env);
+    for entry in history.iter() {
+        if entry.recorded_at >= from_timestamp && entry.recorded_at <= to_timestamp {
+            window.push_back(entry);
+        }
+    }
+    normalize_history(&window)
 }
 
 /// Executes at end of month to write immutable monthly SLA compliance summary records.
@@ -157,11 +194,11 @@ pub fn has_monthly_sla_snapshot(env: &Env, month_index: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{SLACalculatorContract, SLACalculatorContractClient};
+    use crate::{SLACalculatorContract, SLACalculatorContractClient, SLAResult, HISTORY_KEY};
     use soroban_sdk::{
         symbol_short,
         testutils::{Address as _, Ledger as _},
-        Address, Env,
+        Address, BytesN, Env, Symbol, Vec,
     };
 
     #[test]
@@ -274,6 +311,77 @@ mod tests {
             snapshot_monthly_sla(&env, 202609, 100, 25, symbol_short!("met")).unwrap();
             snapshot_monthly_sla(&env, 202610, 120, 30, symbol_short!("viol")).unwrap();
             assert_eq!(snapshot_count(&env), 2);
+        });
+    }
+
+    fn result(env: &Env, status: Symbol, payment: Symbol, at: u64) -> SLAResult {
+        SLAResult {
+            outage_id: symbol_short!("o"),
+            status,
+            mttr_minutes: 10,
+            threshold_minutes: 30,
+            amount: 100,
+            payment_type: payment,
+            rating: symbol_short!("good"),
+            config_version_hash: BytesN::from_array(env, &[0u8; 32]),
+            recorded_at: at,
+        }
+    }
+
+    #[test]
+    fn empty_and_future_only_windows_normalize_to_the_documented_empty_result() {
+        let env = Env::default();
+        let cid = env.register_contract(None, SLACalculatorContract);
+        env.as_contract(&cid, || {
+            assert_eq!(
+                normalize_history(&Vec::new(&env)),
+                NormalizedSnapshot::empty()
+            );
+            assert_eq!(
+                normalize_history_window(&env, 200, 300),
+                NormalizedSnapshot::empty()
+            );
+            assert_eq!(
+                normalize_history_window(&env, 300, 200),
+                NormalizedSnapshot::empty()
+            );
+        });
+    }
+
+    #[test]
+    fn window_normalization_only_counts_in_range_entries() {
+        let env = Env::default();
+        let cid = env.register_contract(None, SLACalculatorContract);
+        env.as_contract(&cid, || {
+            let mut history: Vec<SLAResult> = Vec::new(&env);
+            history.push_back(result(
+                &env,
+                symbol_short!("met"),
+                symbol_short!("rew"),
+                100,
+            ));
+            history.push_back(result(
+                &env,
+                symbol_short!("viol"),
+                symbol_short!("pen"),
+                200,
+            ));
+            history.push_back(result(
+                &env,
+                symbol_short!("met"),
+                symbol_short!("rew"),
+                300,
+            ));
+            env.storage().instance().set(&HISTORY_KEY, &history);
+
+            let window = normalize_history_window(&env, 100, 200);
+            assert_eq!(window.count, 2);
+            assert!(window.has_violations);
+            assert!(window.has_rewards);
+            assert_eq!(
+                normalize_history_window(&env, 400, 500),
+                NormalizedSnapshot::empty()
+            );
         });
     }
 }

@@ -25,8 +25,13 @@ mod coordination_harness_tests {
     extern crate alloc;
     use alloc::format;
     use soroban_sdk::testutils::Address as _;
+    use soroban_sdk::testutils::Ledger as _;
     use soroban_sdk::{symbol_short, Address, Env, Symbol, Vec};
 
+    use crate::circuit_breaker::{
+        circuit_state, close_circuit, open_circuit, probe_failure, probe_in_flight, probe_success,
+        try_claim_probe,
+    };
     use crate::cross_contract_safety::{
         self, CrossContractCallStatus, CrossContractSafety, SafeCallResult,
     };
@@ -250,6 +255,36 @@ mod coordination_harness_tests {
         let safety = CrossContractSafety::new(&env);
         assert_eq!(safety.depth(), 0);
         assert!(!safety.has_pending());
+    }
+
+    #[test]
+    fn test_harness_breaker_admits_one_probe_after_cooldown() {
+        let env = Env::default();
+        let contract = env.register_contract(None, crate::SLACalculatorContract);
+        let guard = Address::generate(&env);
+        env.as_contract(&contract, || {
+            open_circuit(&env, &guard, 100, 10);
+            env.ledger().set_sequence_number(110);
+            let admitted = (0..5).filter(|_| try_claim_probe(&env, 110)).count();
+            assert_eq!(admitted, 1);
+            assert!(probe_in_flight(&env));
+            probe_success(&env, &guard);
+            assert!(!circuit_state(&env).open);
+            assert!(!crate::circuit_breaker::is_emergency_paused(&env));
+
+            open_circuit(&env, &guard, 200, 10);
+            env.ledger().set_sequence_number(210);
+            let admitted = (0..5).filter(|_| try_claim_probe(&env, 210)).count();
+            assert_eq!(admitted, 1);
+            probe_failure(&env, &guard, 210);
+            let state = circuit_state(&env);
+            assert!(state.open);
+            assert_eq!(state.next_probe_ledger, 220);
+            assert_eq!(state.cooldown_ledgers, 10);
+            assert!(crate::circuit_breaker::is_emergency_paused(&env));
+            close_circuit(&env, &guard);
+            assert!(!circuit_state(&env).open);
+        });
     }
 
     // ===================================================================

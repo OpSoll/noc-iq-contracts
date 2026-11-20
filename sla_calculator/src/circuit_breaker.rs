@@ -5,6 +5,7 @@ const CIRCUIT_PAUSED_KEY: Symbol = symbol_short!("CBPAUSE");
 /// #1032 — full breaker state, persisted so an upgrade cannot reset a
 /// cooldown and admit unsafe calls immediately.
 const CIRCUIT_STATE_KEY: Symbol = symbol_short!("CBSTATE");
+const PROBE_IN_FLIGHT_KEY: Symbol = symbol_short!("CBPROBE");
 
 /// Persistent state of the circuit breaker.
 #[contracttype]
@@ -57,6 +58,7 @@ pub fn open_circuit(
     };
     env.storage().instance().set(&CIRCUIT_STATE_KEY, &state);
     env.storage().instance().set(&CIRCUIT_PAUSED_KEY, &true);
+    env.storage().instance().remove(&PROBE_IN_FLIGHT_KEY);
 }
 
 /// Close the breaker. The persisted next-probe ledger is retained for audit.
@@ -66,6 +68,7 @@ pub fn close_circuit(env: &Env, emergency_guard: &Address) {
     state.open = false;
     env.storage().instance().set(&CIRCUIT_STATE_KEY, &state);
     env.storage().instance().set(&CIRCUIT_PAUSED_KEY, &false);
+    env.storage().instance().remove(&PROBE_IN_FLIGHT_KEY);
 }
 
 /// Read the persisted breaker state.
@@ -88,6 +91,29 @@ pub fn probe_allowed(state: &CircuitState, now_ledger: u64) -> bool {
     !state.open || now_ledger >= state.next_probe_ledger
 }
 
+pub fn probe_in_flight(env: &Env) -> bool {
+    env.storage().instance().has(&PROBE_IN_FLIGHT_KEY)
+}
+
+pub fn try_claim_probe(env: &Env, now_ledger: u64) -> bool {
+    if !probe_allowed(&circuit_state(env), now_ledger) || probe_in_flight(env) {
+        return false;
+    }
+    env.storage()
+        .instance()
+        .set(&PROBE_IN_FLIGHT_KEY, &now_ledger);
+    true
+}
+
+pub fn probe_success(env: &Env, emergency_guard: &Address) {
+    close_circuit(env, emergency_guard);
+}
+
+pub fn probe_failure(env: &Env, emergency_guard: &Address, now_ledger: u64) {
+    let cooldown_ledgers = circuit_state(env).cooldown_ledgers;
+    open_circuit(env, emergency_guard, now_ledger, cooldown_ledgers);
+}
+
 #[cfg(test)]
 mod upgrade_state_tests {
     use super::*;
@@ -103,6 +129,45 @@ mod upgrade_state_tests {
         assert!(!probe_allowed(&state, 99));
         assert!(probe_allowed(&state, 100));
         assert!(probe_allowed(&CircuitState::default(), 0));
+    }
+
+    #[test]
+    fn only_one_probe_can_be_claimed_after_cooldown() {
+        let env = Env::default();
+        let contract = env.register_contract(None, crate::SLACalculatorContract);
+        env.as_contract(&contract, || {
+            let guard = Address::generate(&env);
+            open_circuit(&env, &guard, 100, 20);
+            assert!(!try_claim_probe(&env, 119));
+            assert!(try_claim_probe(&env, 120));
+            assert!(probe_in_flight(&env));
+            assert!(!try_claim_probe(&env, 120));
+            assert!(!try_claim_probe(&env, 200));
+
+            probe_success(&env, &guard);
+            assert!(!probe_in_flight(&env));
+            assert!(!circuit_state(&env).open);
+        });
+    }
+
+    #[test]
+    fn failed_probe_reopens_for_the_configured_interval() {
+        let env = Env::default();
+        let contract = env.register_contract(None, crate::SLACalculatorContract);
+        env.as_contract(&contract, || {
+            let guard = Address::generate(&env);
+            open_circuit(&env, &guard, 100, 20);
+            assert!(try_claim_probe(&env, 120));
+            probe_failure(&env, &guard, 120);
+
+            let state = circuit_state(&env);
+            assert!(state.open);
+            assert_eq!(state.next_probe_ledger, 140);
+            assert_eq!(state.cooldown_ledgers, 20);
+            assert!(!probe_in_flight(&env));
+            assert!(!try_claim_probe(&env, 139));
+            assert!(try_claim_probe(&env, 140));
+        });
     }
 
     #[test]

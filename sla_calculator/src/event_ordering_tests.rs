@@ -381,3 +381,96 @@ mod mixed_family_order_tests {
         let _ = &env;
     }
 }
+
+#[cfg(test)]
+mod snapshot_equal_ledger_order_tests {
+    use crate::state_snapshot::{
+        export_snapshot, ordered_snapshot_history, snapshot_checksum, SNAPSHOT_EVENT_ORDER_RULE,
+    };
+    use crate::{SLACalculatorContract, SLACalculatorContractClient, SLAResult, HISTORY_KEY};
+    use soroban_sdk::{
+        symbol_short, testutils::Address as _, xdr::ToXdr, Address, BytesN, Env, Vec,
+    };
+
+    fn entry(env: &Env, outage_id: soroban_sdk::Symbol, at: u64) -> SLAResult {
+        SLAResult {
+            outage_id,
+            status: symbol_short!("met"),
+            mttr_minutes: 5,
+            threshold_minutes: 30,
+            amount: 100,
+            payment_type: symbol_short!("rew"),
+            rating: symbol_short!("good"),
+            config_version_hash: BytesN::from_array(env, &[0u8; 32]),
+            recorded_at: at,
+        }
+    }
+
+    fn setup(env: &Env) -> Address {
+        env.mock_all_auths();
+        let id = env.register_contract(None, SLACalculatorContract);
+        let client = SLACalculatorContractClient::new(env, &id);
+        let admin = Address::generate(env);
+        let operator = Address::generate(env);
+        client.initialize(&admin, &operator);
+        id
+    }
+
+    #[test]
+    fn the_snapshot_tie_breaker_is_documented() {
+        assert!(SNAPSHOT_EVENT_ORDER_RULE.contains("recorded_at"));
+        assert!(SNAPSHOT_EVENT_ORDER_RULE.contains("outage_id"));
+    }
+
+    #[test]
+    fn equal_ledger_fixtures_export_byte_identical_snapshots() {
+        let env = Env::default();
+        let id = setup(&env);
+        let ledger = 1_700_000_000;
+
+        env.as_contract(&id, || {
+            let first_entry = entry(&env, symbol_short!("OUT_B"), ledger);
+            let second_entry = entry(&env, symbol_short!("OUT_A"), ledger);
+
+            let mut forward: Vec<SLAResult> = Vec::new(&env);
+            forward.push_back(first_entry.clone());
+            forward.push_back(second_entry.clone());
+            let mut reverse: Vec<SLAResult> = Vec::new(&env);
+            reverse.push_back(second_entry);
+            reverse.push_back(first_entry);
+
+            env.storage().instance().set(&HISTORY_KEY, &forward);
+            let first = export_snapshot(&env).unwrap();
+            env.storage().instance().set(&HISTORY_KEY, &reverse);
+            let second = export_snapshot(&env).unwrap();
+
+            assert_eq!(
+                first.history.get(0).unwrap().outage_id,
+                symbol_short!("OUT_A")
+            );
+            assert_eq!(
+                second.history.get(1).unwrap().outage_id,
+                symbol_short!("OUT_B")
+            );
+            assert_eq!(first.clone().to_xdr(&env), second.clone().to_xdr(&env));
+            assert_eq!(
+                snapshot_checksum(&env, &first),
+                snapshot_checksum(&env, &second)
+            );
+        });
+    }
+
+    #[test]
+    fn recorded_at_takes_precedence_over_the_tie_breaker() {
+        let env = Env::default();
+        let id = setup(&env);
+        env.as_contract(&id, || {
+            let mut history: Vec<SLAResult> = Vec::new(&env);
+            history.push_back(entry(&env, symbol_short!("OUT_A"), 20));
+            history.push_back(entry(&env, symbol_short!("OUT_Z"), 10));
+            let ordered = ordered_snapshot_history(&env, &history);
+            assert_eq!(ordered.get(0).unwrap().recorded_at, 10);
+            assert_eq!(ordered.get(1).unwrap().recorded_at, 20);
+        });
+    }
+}

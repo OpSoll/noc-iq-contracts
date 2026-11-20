@@ -13,6 +13,11 @@ pub enum RescueError {
 
 const RESCUE_EVENT: Symbol = symbol_short!("rescued");
 
+fn publish_rescue(env: &Env, token: &Address, recipient: &Address, amount: i128) {
+    env.events()
+        .publish((RESCUE_EVENT, token.clone()), (amount, recipient.clone()));
+}
+
 /// Admin-only: rescue a non-collateral token balance accidentally sent
 /// to the contract address.
 pub fn rescue_tokens(
@@ -24,12 +29,14 @@ pub fn rescue_tokens(
     amount: i128,
 ) -> Result<(), RescueError> {
     admin.require_auth();
-    if token_address == collateral_token {
+    if token_address == collateral_token
+        || crate::collateral_lock::is_protected_asset(env, token_address)
+    {
         return Err(RescueError::CannotRescueCollateralToken);
     }
     let client = token::Client::new(env, token_address);
     client.transfer(&env.current_contract_address(), recipient, &amount);
-    env.events().publish((RESCUE_EVENT,), token_address.clone());
+    publish_rescue(env, token_address, recipient, amount);
     Ok(())
 }
 
@@ -44,25 +51,29 @@ pub fn rescue_surplus_collateral(
     amount: i128,
 ) -> Result<(), RescueError> {
     admin.require_auth();
+    if crate::collateral_lock::is_protected_asset(env, collateral_token) {
+        return Err(RescueError::CannotRescueCollateralToken);
+    }
     let client = token::Client::new(env, collateral_token);
     let balance = client.balance(&env.current_contract_address());
     let locked = crate::collateral_lock::total_locked(env);
     if amount > balance - locked {
         return Err(RescueError::ExceedsUnlockedSurplus);
     }
+    crate::collateral_lock::protect_accounting_asset(env, collateral_token);
     client.transfer(&env.current_contract_address(), recipient, &amount);
-    env.events()
-        .publish((RESCUE_EVENT,), collateral_token.clone());
+    publish_rescue(env, collateral_token, recipient, amount);
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::collateral_lock::lock_collateral;
+    use crate::collateral_lock::{lock_collateral, protect_accounting_asset};
     use crate::SLACalculatorContract;
-    use soroban_sdk::testutils::Address as _;
+    use soroban_sdk::testutils::{Address as _, Events as _};
     use soroban_sdk::token::{Client as TokenClient, StellarAssetClient};
+    use soroban_sdk::TryIntoVal;
 
     struct Fixture {
         env: Env,
@@ -156,5 +167,61 @@ mod tests {
             rescue_surplus_collateral(&f.env, &f.admin, &collateral, &f.recipient, 250).unwrap();
         });
         assert_eq!(TokenClient::new(&f.env, &collateral).balance(&f.recipient), 250);
+    }
+
+    #[test]
+    fn test_a_registered_accounting_asset_cannot_be_rescued_by_an_admin() {
+        let f = setup();
+        let protected = token_with_balance(&f, 500);
+        let unrelated_collateral = Address::generate(&f.env);
+        f.env.as_contract(&f.contract, || {
+            protect_accounting_asset(&f.env, &protected);
+            assert_eq!(
+                rescue_tokens(
+                    &f.env,
+                    &f.admin,
+                    &unrelated_collateral,
+                    &protected,
+                    &f.recipient,
+                    500
+                ),
+                Err(RescueError::CannotRescueCollateralToken)
+            );
+        });
+        assert_eq!(TokenClient::new(&f.env, &protected).balance(&f.contract), 500);
+        assert_eq!(TokenClient::new(&f.env, &protected).balance(&f.recipient), 0);
+    }
+
+    #[test]
+    fn test_a_registered_accounting_asset_is_blocked_from_surplus_rescue() {
+        let f = setup();
+        let collateral = token_with_balance(&f, 250);
+        f.env.as_contract(&f.contract, || {
+            protect_accounting_asset(&f.env, &collateral);
+            assert_eq!(
+                rescue_surplus_collateral(&f.env, &f.admin, &collateral, &f.recipient, 10),
+                Err(RescueError::CannotRescueCollateralToken)
+            );
+        });
+        assert_eq!(TokenClient::new(&f.env, &collateral).balance(&f.contract), 250);
+    }
+
+    #[test]
+    fn test_dust_rescue_event_reports_the_exact_amount_and_destination() {
+        let f = setup();
+        let collateral = Address::generate(&f.env);
+        let stray = token_with_balance(&f, 500);
+        f.env.as_contract(&f.contract, || {
+            rescue_tokens(&f.env, &f.admin, &collateral, &stray, &f.recipient, 300).unwrap();
+        });
+
+        let events = f.env.events().all();
+        let (_, topics, data) = events.last().unwrap();
+        let topic_0: Symbol = topics.get(0).unwrap().try_into_val(&f.env).unwrap();
+        let topic_1: Address = topics.get(1).unwrap().try_into_val(&f.env).unwrap();
+        let reported: (i128, Address) = data.try_into_val(&f.env).unwrap();
+        assert_eq!(topic_0, RESCUE_EVENT);
+        assert_eq!(topic_1, stray);
+        assert_eq!(reported, (300, f.recipient));
     }
 }

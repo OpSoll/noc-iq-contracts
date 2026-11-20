@@ -10,6 +10,9 @@ use soroban_sdk::testutils::Events as _;
 use soroban_sdk::testutils::Ledger as _;
 use soroban_sdk::{Env, Symbol, TryIntoVal, Vec};
 
+mod batch_memory_test;
+mod batch_xdr_test;
+
 // ============================================================
 // Test helpers
 // ============================================================
@@ -2315,6 +2318,47 @@ fn test_get_pending_admin_none_when_no_proposal() {
     assert_eq!(client.get_pending_admin(), None);
 }
 
+#[test]
+fn test_admin_transfer_acceptance_uses_latest_pending_and_names_both_admins() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let cid = env.register_contract(None, SLACalculatorContract);
+    let admin = soroban_sdk::Address::generate(&env);
+    let superseded = soroban_sdk::Address::generate(&env);
+    let latest = soroban_sdk::Address::generate(&env);
+
+    env.as_contract(&cid, || {
+        env.storage().instance().set(&ADMIN_KEY, &admin);
+        crate::admin_transfer::propose_admin(&env, &admin, superseded.clone());
+        crate::admin_transfer::propose_admin(&env, &admin, latest.clone());
+
+        assert_eq!(
+            crate::admin_transfer::accept_admin(&env, &superseded),
+            Err(crate::admin_transfer::AdminTransferError::NotPendingAdmin)
+        );
+        assert_eq!(crate::admin_transfer::accept_admin(&env, &latest), Ok(()));
+
+        let stored: soroban_sdk::Address = env.storage().instance().get(&ADMIN_KEY).unwrap();
+        assert_eq!(stored, latest);
+    });
+
+    let events = env.events().all();
+    let mut accepted = None;
+    for i in 0..events.len() {
+        let (_, topics, data) = events.get(i).unwrap();
+        let topic: Symbol = topics.get(0).unwrap().try_into_val(&env).unwrap();
+        if topic == symbol_short!("adm_acpt") {
+            accepted = Some(data);
+        }
+    }
+    let (old_admin, new_admin): (soroban_sdk::Address, soroban_sdk::Address) = accepted
+        .expect("acceptance event emitted")
+        .try_into_val(&env)
+        .unwrap();
+    assert_eq!(old_admin, admin);
+    assert_eq!(new_admin, latest);
+}
+
 // ============================================================
 // #64 – Two-step operator handoff
 // ============================================================
@@ -2466,6 +2510,58 @@ fn test_admin_can_renounce() {
     let (_env, client, actors) = setup();
     client.renounce_admin(&actors.admin);
     // After renounce, admin-gated calls must fail
+}
+
+#[test]
+fn test_renounce_is_irreversible_and_event_matches_stored_state() {
+    let (env, client, actors) = setup();
+    client.renounce_admin(&actors.admin);
+
+    assert_eq!(
+        client
+            .try_renounce_admin(&actors.admin)
+            .unwrap_err()
+            .unwrap(),
+        SLAError::Unauthorized
+    );
+    assert_eq!(
+        client
+            .try_propose_admin(&actors.admin, &actors.stranger)
+            .unwrap_err()
+            .unwrap(),
+        SLAError::Unauthorized
+    );
+    assert_eq!(
+        client
+            .try_set_config(
+                &actors.admin,
+                &symbol_short!("critical"),
+                &20,
+                &200,
+                &1000,
+                &200,
+                &150,
+                &100,
+            )
+            .unwrap_err()
+            .unwrap(),
+        SLAError::Unauthorized
+    );
+    assert_eq!(
+        client.try_get_admin().unwrap_err().unwrap(),
+        SLAError::NotInitialized
+    );
+
+    let events = env.events().all();
+    let mut emitter: Option<soroban_sdk::Address> = None;
+    for i in 0..events.len() {
+        let (_, topics, _) = events.get(i).unwrap();
+        let topic: Symbol = topics.get(0).unwrap().try_into_val(&env).unwrap();
+        if topic == symbol_short!("adm_ren") {
+            emitter = Some(topics.get(2).unwrap().try_into_val(&env).unwrap());
+        }
+    }
+    assert_eq!(emitter, Some(actors.admin));
 }
 
 #[test]
@@ -9876,4 +9972,65 @@ fn test_invalid_severity_symbol_rejected_on_calculate() {
         &10,
     );
     assert!(result.is_err());
+}
+
+#[cfg(test)]
+mod vault_withdrawal_timing_tests {
+    use super::*;
+    use crate::vault_unbonding::{
+        request_unbonding, withdraw_unbonded, unbonding_for, UnbondingError,
+    };
+
+    #[test]
+    fn early_withdrawal_is_rejected_and_keeps_the_locked_amount() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 1_000);
+        let id = env.register_contract(None, SLACalculatorContract);
+        let operator = soroban_sdk::Address::generate(&env);
+        let tranche = symbol(&env, "tranche_a");
+
+        env.as_contract(&id, || {
+            let request = request_unbonding(&env, &operator, &tranche, 500);
+            env.ledger().with_mut(|l| l.timestamp = request.requested_at + 7 * 24 * 60 * 60 - 1);
+            assert_eq!(
+                withdraw_unbonded(&env, &operator, &tranche, 100),
+                Err(UnbondingError::NotUnlocked)
+            );
+            assert_eq!(unbonding_for(&env, &operator, &tranche).unwrap().amount, 500);
+        });
+    }
+}
+
+#[cfg(test)]
+mod sla_stats_overflow_tests {
+    use super::*;
+    use crate::sla_stats::{
+        get_stats, record_calculation, SLAStats as ModuleSLAStats, StatsError,
+    };
+
+    #[test]
+    fn a_rejected_update_preserves_every_stat_field() {
+        let env = Env::default();
+        let id = env.register_contract(None, SLACalculatorContract);
+        env.as_contract(&id, || {
+            let before = ModuleSLAStats {
+                total_calculations: u64::MAX,
+                met_count: 7,
+                violation_count: 3,
+                total_penalty: i128::MAX,
+            };
+            env.storage().instance().set(&symbol_short!("STATS2"), &before);
+
+            assert_eq!(
+                record_calculation(&env, false, 1),
+                Err(StatsError::TotalCalculationsOverflow)
+            );
+            let after = get_stats(&env);
+            assert_eq!(after.total_calculations, before.total_calculations);
+            assert_eq!(after.met_count, before.met_count);
+            assert_eq!(after.violation_count, before.violation_count);
+            assert_eq!(after.total_penalty, before.total_penalty);
+        });
+    }
 }

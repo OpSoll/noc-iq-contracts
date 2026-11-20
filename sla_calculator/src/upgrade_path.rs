@@ -143,6 +143,7 @@ pub fn perform_upgrade(env: &Env, caller: &Address) -> Result<(), SLAError> {
     // #1032 — snapshot operational safety state before any migration step so
     // an open breaker keeps its cooldown and next-probe ledger afterwards.
     let breaker_before = crate::circuit_breaker::circuit_state(env);
+    let freeze_before = crate::config_freeze::freeze_state(env);
 
     let from_version = stored;
     let mut current = stored;
@@ -157,6 +158,7 @@ pub fn perform_upgrade(env: &Env, caller: &Address) -> Result<(), SLAError> {
     // if current == 1 { ... current = 2; }
 
     if current != STORAGE_VERSION {
+        crate::config_freeze::restore_state(env, &freeze_before);
         return Err(SLAError::VersionMismatch);
     }
 
@@ -179,6 +181,7 @@ pub fn perform_upgrade(env: &Env, caller: &Address) -> Result<(), SLAError> {
     // #1032 — restore the breaker exactly as it was; a closed breaker stays
     // closed and an open breaker does not lose its cooldown.
     crate::circuit_breaker::restore_state(env, &breaker_before);
+    crate::config_freeze::restore_state(env, &freeze_before);
 
     env.events().publish(
         (EVENT_UPGRADED, EVENT_VERSION, caller),
@@ -618,6 +621,62 @@ mod breaker_upgrade_tests {
             env.storage().instance().set(&STORAGE_VERSION_KEY, &0u32);
             assert_eq!(perform_upgrade(&env, &admin), Ok(()));
             assert!(!circuit_state(&env).open);
+        });
+    }
+}
+
+#[cfg(test)]
+mod config_freeze_upgrade_tests {
+    use super::*;
+    use crate::config_freeze::{
+        freeze_config, freeze_state, is_config_frozen, require_config_mutable,
+        unfreeze_config_authorized,
+    };
+    use soroban_sdk::testutils::Address as _;
+
+    #[test]
+    fn frozen_config_stays_frozen_until_authorized_unfreeze() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let cid = env.register_contract(None, crate::SLACalculatorContract);
+        let admin = Address::generate(&env);
+
+        env.as_contract(&cid, || {
+            env.storage().instance().set(&ADMIN_KEY, &admin);
+            env.storage().instance().set(&STORAGE_VERSION_KEY, &0u32);
+            freeze_config(env);
+            let before = freeze_state(env);
+
+            assert_eq!(perform_upgrade(env, &admin), Ok(()));
+
+            assert!(is_config_frozen(env));
+            assert_eq!(freeze_state(env), before);
+            assert!(require_config_mutable(env).is_err());
+            assert_eq!(unfreeze_config_authorized(env, &admin), Ok(()));
+            assert!(!is_config_frozen(env));
+            assert_eq!(require_config_mutable(env), Ok(()));
+        });
+    }
+
+    #[test]
+    fn failed_migration_preserves_preupgrade_freeze_state() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let cid = env.register_contract(None, crate::SLACalculatorContract);
+        let admin = Address::generate(&env);
+
+        env.as_contract(&cid, || {
+            env.storage().instance().set(&ADMIN_KEY, &admin);
+            env.storage()
+                .instance()
+                .set(&STORAGE_VERSION_KEY, &(STORAGE_VERSION + 1));
+            freeze_config(env);
+            let before = freeze_state(env);
+
+            assert_eq!(perform_upgrade(env, &admin), Err(SLAError::VersionMismatch));
+
+            assert_eq!(freeze_state(env), before);
+            assert!(is_config_frozen(env));
         });
     }
 }

@@ -1,4 +1,4 @@
-use soroban_sdk::{contracterror, symbol_short, Env, Symbol};
+use soroban_sdk::{contracterror, symbol_short, Address, Env, Symbol};
 
 const FREEZE_KEY: Symbol = symbol_short!("FREEZE");
 /// Counts completed freezes: it is bumped each time the config goes from mutable to frozen, so a
@@ -63,6 +63,40 @@ pub fn freeze_config(env: &Env) {
 
 pub fn unfreeze_config(env: &Env) {
     env.storage().instance().set(&FREEZE_KEY, &false);
+}
+
+pub fn unfreeze_config_authorized(env: &Env, admin: &Address) -> Result<(), crate::SLAError> {
+    admin.require_auth();
+    let current: Address = env
+        .storage()
+        .instance()
+        .get(&crate::ADMIN_KEY)
+        .ok_or(crate::SLAError::NotInitialized)?;
+    if current != *admin {
+        return Err(crate::SLAError::Unauthorized);
+    }
+    unfreeze_config(env);
+    Ok(())
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FreezeState {
+    pub frozen: bool,
+    pub revision: u32,
+}
+
+pub fn freeze_state(env: &Env) -> FreezeState {
+    FreezeState {
+        frozen: is_config_frozen(env),
+        revision: freeze_revision(env),
+    }
+}
+
+pub fn restore_state(env: &Env, state: &FreezeState) {
+    env.storage().instance().set(&FREEZE_KEY, &state.frozen);
+    env.storage()
+        .instance()
+        .set(&FREEZE_REVISION_KEY, &state.revision);
 }
 
 pub fn is_config_frozen(env: &Env) -> bool {

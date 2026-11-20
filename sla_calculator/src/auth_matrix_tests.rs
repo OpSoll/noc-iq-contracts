@@ -128,3 +128,104 @@ mod dispute_finalization_auth_tests {
         assert!(!adjudication_started(&DisputeStatus::Resolved));
     }
 }
+
+#[cfg(test)]
+mod config_freeze_toggle_auth_tests {
+    use crate::config_freeze_toggle::{
+        assert_config_not_frozen, freeze_configuration, is_configuration_frozen,
+        unfreeze_configuration, ConfigFreezeError,
+    };
+    use soroban_sdk::{
+        symbol_short,
+        testutils::{Address as _, Events as _},
+        Address, Env, IntoVal,
+    };
+
+    fn setup() -> (Env, Address, Address) {
+        let env = Env::default();
+        let id = env.register_contract(None, crate::SLACalculatorContract);
+        let admin = Address::generate(&env);
+        (env, id, admin)
+    }
+
+    #[test]
+    #[should_panic]
+    fn unauthorized_caller_cannot_freeze_configuration() {
+        let (env, id, _) = setup();
+        let stranger = Address::generate(&env);
+
+        env.as_contract(&id, || freeze_configuration(&env, &stranger));
+    }
+
+    #[test]
+    #[should_panic]
+    fn unauthorized_caller_cannot_unfreeze_configuration() {
+        let (env, id, _) = setup();
+        let stranger = Address::generate(&env);
+
+        env.as_contract(&id, || {
+            env.storage()
+                .instance()
+                .set(&symbol_short!("CFGFRZN"), &true);
+            unfreeze_configuration(&env, &stranger);
+        });
+    }
+
+    #[test]
+    fn authorized_freeze_and_unfreeze_emit_one_event_each() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let id = env.register_contract(None, crate::SLACalculatorContract);
+        let admin = Address::generate(&env);
+
+        env.as_contract(&id, || {
+            freeze_configuration(&env, &admin);
+            assert!(is_configuration_frozen(&env));
+            assert_eq!(
+                assert_config_not_frozen(&env),
+                Err(ConfigFreezeError::ConfigIsFrozen)
+            );
+
+            unfreeze_configuration(&env, &admin);
+            assert!(!is_configuration_frozen(&env));
+            assert_eq!(assert_config_not_frozen(&env), Ok(()));
+        });
+
+        let events = env.events().all();
+        assert_eq!(events.len(), 2);
+        assert_eq!(
+            events.get(0).unwrap(),
+            (
+                id.clone(),
+                (symbol_short!("cfgfrz"), admin.clone()).into_val(&env),
+                true.into_val(&env)
+            )
+        );
+        assert_eq!(
+            events.get(1).unwrap(),
+            (
+                id.clone(),
+                (symbol_short!("cfgunfrz"), admin.clone()).into_val(&env),
+                false.into_val(&env)
+            )
+        );
+    }
+
+    #[test]
+    fn repeating_a_direction_does_not_emit_another_event() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let id = env.register_contract(None, crate::SLACalculatorContract);
+        let admin = Address::generate(&env);
+
+        env.as_contract(&id, || {
+            freeze_configuration(&env, &admin);
+            freeze_configuration(&env, &admin);
+            assert_eq!(env.events().all().len(), 1);
+
+            unfreeze_configuration(&env, &admin);
+            unfreeze_configuration(&env, &admin);
+            assert_eq!(env.events().all().len(), 2);
+        });
+    }
+}

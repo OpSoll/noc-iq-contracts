@@ -1,4 +1,7 @@
-use soroban_sdk::{symbol_short, Env, Symbol, Vec};
+use soroban_sdk::{symbol_short, Env, IntoVal, Map, Symbol, TryFromVal, Val, Vec};
+
+use crate::config_version_hash::ConfigRevisionSnapshot;
+use crate::storage_helpers::{read_or_default, StorageReadError};
 
 pub const SCHEMA_VERSION_KEY: Symbol = symbol_short!("VER");
 pub const CONFIG_KEY: Symbol = symbol_short!("CONFIG");
@@ -13,6 +16,7 @@ pub enum IntegrityIssue {
     SchemaVersionMismatch,
     /// History holds more entries than the stats counter accounts for.
     OrphanedHistory,
+    CorruptValue,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,6 +38,45 @@ impl IntegrityReport {
 
 pub fn essential_keys() -> [Symbol; 4] {
     [CONFIG_KEY, STATS_KEY, HISTORY_KEY, SCHEMA_VERSION_KEY]
+}
+
+pub fn read_checked<K, V>(env: &Env, key: &K, default: V) -> Result<V, IntegrityIssue>
+where
+    K: IntoVal<Env, Val>,
+    V: TryFromVal<Env, Val>,
+{
+    read_or_default(env, key, default)
+        .map_err(|StorageReadError::CorruptValue| IntegrityIssue::CorruptValue)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConfigRevisionIntegrity {
+    Healthy,
+    MissingSnapshot,
+    DigestMismatch,
+}
+
+pub fn check_config_revision_integrity(env: &Env) -> ConfigRevisionIntegrity {
+    let snapshot: Option<ConfigRevisionSnapshot> = env
+        .storage()
+        .instance()
+        .get(&crate::config_version_hash::CONFIG_REVISION_KEY);
+    let snapshot = match snapshot {
+        Some(snapshot) => snapshot,
+        None => return ConfigRevisionIntegrity::MissingSnapshot,
+    };
+    let configs: Option<Map<Symbol, crate::SLAConfig>> =
+        env.storage().instance().get(&crate::CONFIG_KEY);
+    let configs = match configs {
+        Some(configs) => configs,
+        None => return ConfigRevisionIntegrity::MissingSnapshot,
+    };
+    let current = crate::compute_config_version_hash(env, &configs);
+    if snapshot.digest == current {
+        ConfigRevisionIntegrity::Healthy
+    } else {
+        ConfigRevisionIntegrity::DigestMismatch
+    }
 }
 
 fn collect_missing(env: &Env) -> Vec<IntegrityIssue> {
@@ -96,6 +139,10 @@ pub fn integrity_check(env: &Env) -> IntegrityReport {
         issues,
         checked_keys,
     }
+}
+
+pub fn duplicate_lock_amount_allowed(existing_amount: i128, proposed_amount: i128) -> bool {
+    existing_amount == proposed_amount
 }
 
 // -----------------------------------------------------------------------
@@ -353,5 +400,138 @@ mod lock_id_integrity_tests {
     #[test]
     fn a_different_amount_is_rejected() {
         assert!(!duplicate_lock_amount_allowed(1_000, 1_001));
+    }
+}
+
+#[cfg(test)]
+mod checked_read_tests {
+    use super::*;
+    use crate::SLACalculatorContract;
+
+    #[test]
+    fn a_missing_key_uses_the_documented_default() {
+        let env = Env::default();
+        let id = env.register_contract(None, SLACalculatorContract);
+        env.as_contract(&id, || {
+            let key = symbol_short!("none");
+            assert_eq!(read_checked::<_, u32>(&env, &key, 5), Ok(5));
+        });
+    }
+
+    #[test]
+    fn a_corrupt_value_maps_to_a_typed_integrity_issue() {
+        let env = Env::default();
+        let id = env.register_contract(None, SLACalculatorContract);
+        env.as_contract(&id, || {
+            let key = symbol_short!("bad");
+            env.storage().instance().set(&key, &symbol_short!("nope"));
+            assert_eq!(
+                read_checked::<_, u32>(&env, &key, 5),
+                Err(IntegrityIssue::CorruptValue)
+            );
+            let raw: soroban_sdk::Symbol = env.storage().instance().get(&key).unwrap();
+            assert_eq!(raw, symbol_short!("nope"));
+        });
+    }
+}
+
+#[cfg(test)]
+mod config_revision_integrity_tests {
+    use super::*;
+    use crate::config_version_hash::{write_config_revision, CONFIG_REVISION_KEY};
+    use crate::{SLAConfig, SLACalculatorContract};
+    use soroban_sdk::{testutils::Events as _, BytesN};
+
+    fn configs(env: &Env) -> Map<Symbol, SLAConfig> {
+        let mut map = Map::new(env);
+        map.set(
+            symbol_short!("critical"),
+            SLAConfig {
+                threshold_minutes: 30,
+                penalty_per_minute: 50,
+                reward_base: 500,
+                top_tier_multiplier: 200,
+                excel_tier_multiplier: 150,
+                good_tier_multiplier: 100,
+            },
+        );
+        map
+    }
+
+    fn with_contract<R>(env: &Env, f: impl FnOnce() -> R) -> R {
+        let id = env.register_contract(None, SLACalculatorContract);
+        env.as_contract(&id, f)
+    }
+
+    #[test]
+    fn a_missing_revision_snapshot_is_reported() {
+        let env = Env::default();
+        with_contract(&env, || {
+            env.storage()
+                .instance()
+                .set(&crate::CONFIG_KEY, &configs(&env));
+            assert_eq!(
+                check_config_revision_integrity(&env),
+                ConfigRevisionIntegrity::MissingSnapshot
+            );
+        });
+    }
+
+    #[test]
+    fn a_stale_digest_is_reported_as_a_mismatch() {
+        let env = Env::default();
+        with_contract(&env, || {
+            env.storage()
+                .instance()
+                .set(&crate::CONFIG_KEY, &configs(&env));
+            write_config_revision(&env, 1, &BytesN::from_array(&env, &[1u8; 32]));
+            assert_eq!(
+                check_config_revision_integrity(&env),
+                ConfigRevisionIntegrity::DigestMismatch
+            );
+        });
+    }
+
+    #[test]
+    fn a_matching_digest_is_healthy() {
+        let env = Env::default();
+        with_contract(&env, || {
+            let cfg = configs(&env);
+            env.storage().instance().set(&crate::CONFIG_KEY, &cfg);
+            let digest = crate::compute_config_version_hash(&env, &cfg);
+            write_config_revision(&env, 1, &digest);
+            assert_eq!(
+                check_config_revision_integrity(&env),
+                ConfigRevisionIntegrity::Healthy
+            );
+        });
+    }
+
+    #[test]
+    fn the_check_is_read_only() {
+        let env = Env::default();
+        with_contract(&env, || {
+            let cfg = configs(&env);
+            env.storage().instance().set(&crate::CONFIG_KEY, &cfg);
+            let digest = crate::compute_config_version_hash(&env, &cfg);
+            write_config_revision(&env, 1, &digest);
+
+            assert_eq!(
+                check_config_revision_integrity(&env),
+                ConfigRevisionIntegrity::Healthy
+            );
+            assert_eq!(
+                check_config_revision_integrity(&env),
+                ConfigRevisionIntegrity::Healthy
+            );
+            let stored: ConfigRevisionSnapshot = env
+                .storage()
+                .instance()
+                .get(&CONFIG_REVISION_KEY)
+                .unwrap();
+            assert_eq!(stored.revision, 1);
+            assert_eq!(stored.digest, digest);
+            assert!(env.events().all().is_empty());
+        });
     }
 }

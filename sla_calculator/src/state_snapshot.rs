@@ -15,12 +15,16 @@ const SNAPSHOT_KEY: Symbol = symbol_short!("SNAP");
 const RETENTION_LIMIT_KEY: Symbol = symbol_short!("RETLIM");
 const MAX_HISTORY_SIZE: u32 = 1000;
 
+pub const SNAPSHOT_EVENT_ORDER_RULE: &str =
+    "recorded_at ascending; equal-ledger entries break ties by outage_id ascending; identical keys keep insertion order";
+
 // -----------------------------------------------------------------------
 // Types
 // -----------------------------------------------------------------------
 
 /// Complete contract state snapshot for backup and migration.
 #[soroban_sdk::contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ContractSnapshot {
     /// Snapshot metadata.
     pub metadata: SnapshotMetadata,
@@ -48,6 +52,7 @@ pub struct ContractSnapshot {
 
 /// Snapshot metadata for tracking and validation.
 #[soroban_sdk::contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SnapshotMetadata {
     /// Snapshot version for format evolution.
     pub version: u32,
@@ -64,6 +69,63 @@ pub struct SnapshotMetadata {
 // -----------------------------------------------------------------------
 // Functions
 // -----------------------------------------------------------------------
+
+fn config_version_hash(configs: &soroban_sdk::Map<Symbol, SLAConfig>) -> u64 {
+    let severities = [
+        symbol_short!("critical"),
+        symbol_short!("high"),
+        symbol_short!("medium"),
+        symbol_short!("low"),
+    ];
+    const BASE: u64 = 91138233;
+    const MODULUS: u64 = (1u64 << 63) - 25;
+
+    let mut hash: u64 = 1;
+    let mut power: u64 = 1;
+    for severity in severities {
+        let config = match configs.get(severity) {
+            Some(config) => config,
+            None => return 0,
+        };
+        for value in [
+            config.threshold_minutes as u64,
+            config.penalty_per_minute as u64,
+            config.reward_base as u64,
+        ] {
+            hash = hash
+                .wrapping_mul(BASE)
+                .wrapping_add(value)
+                .wrapping_mul(power)
+                % MODULUS;
+            power = power.wrapping_mul(BASE) % MODULUS;
+        }
+    }
+    hash.wrapping_mul(BASE)
+        .wrapping_add(0x9e3779b97f4a7c15u64)
+        % MODULUS
+}
+
+pub fn ordered_snapshot_history(
+    env: &Env,
+    history: &soroban_sdk::Vec<SLAResult>,
+) -> soroban_sdk::Vec<SLAResult> {
+    let mut ordered = soroban_sdk::Vec::new(env);
+    for entry in history.iter() {
+        let mut at = ordered.len();
+        while at > 0 {
+            let previous = ordered.get(at - 1).unwrap();
+            if previous.recorded_at < entry.recorded_at
+                || (previous.recorded_at == entry.recorded_at
+                    && previous.outage_id <= entry.outage_id)
+            {
+                break;
+            }
+            at -= 1;
+        }
+        ordered.insert(at, entry);
+    }
+    ordered
+}
 
 /// Export a complete snapshot of the contract state.
 ///
@@ -112,6 +174,7 @@ pub fn export_snapshot(env: &Env) -> Result<ContractSnapshot, SLAError> {
     }
     let config_snapshot = SLAConfigSnapshot {
         version: symbol_short!("v1"),
+        version_hash: config_version_hash(&configs),
         entries,
     };
 
@@ -126,11 +189,12 @@ pub fn export_snapshot(env: &Env) -> Result<ContractSnapshot, SLAError> {
             total_penalties: 0,
         });
 
-    let history: soroban_sdk::Vec<SLAResult> = env
+    let stored_history: soroban_sdk::Vec<SLAResult> = env
         .storage()
         .instance()
         .get(&HISTORY_KEY)
         .unwrap_or_else(|| soroban_sdk::Vec::new(env));
+    let history = ordered_snapshot_history(env, &stored_history);
 
     let storage_version: u32 = env
         .storage()
