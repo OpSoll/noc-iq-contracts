@@ -90,3 +90,31 @@ mod interleave_tests {
         assert_eq!(get_config_version_hash(&env, &bytes), compute_config_version_hash(&env, &bytes));
     }
 }
+
+#[cfg(test)]
+mod digest_stability_tests {
+    use super::*;
+    use soroban_sdk::{symbol_short, testutils::Address as _, Address};
+
+    #[test]
+    fn change_digest_binds_actor_revision_and_values() {
+        let env = Env::default();
+        let actor = Address::generate(&env);
+        let other = Address::generate(&env);
+        let severity = symbol_short!("critical");
+        let digest = compute_change_digest(&env, &actor, 3, &severity, 15, 30, 10, 20, 100, 200);
+
+        assert_ne!(
+            digest,
+            compute_change_digest(&env, &other, 3, &severity, 15, 30, 10, 20, 100, 200)
+        );
+        assert_ne!(
+            digest,
+            compute_change_digest(&env, &actor, 4, &severity, 15, 30, 10, 20, 100, 200)
+        );
+        assert_eq!(
+            digest,
+            compute_change_digest(&env, &actor, 3, &severity, 15, 30, 10, 20, 100, 200)
+        );
+    }
+}

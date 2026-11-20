@@ -4,6 +4,8 @@ use soroban_sdk::{contracttype, Env, Map, Symbol, Vec};
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ConfigError {
     RewardOutOfBounds,
+    MetadataTooLong,
+    InvalidVersion,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -21,6 +23,21 @@ pub struct ConfigManager;
 impl ConfigManager {
     const MIN_REWARD_BASE: u64 = 1;
     const MAX_REWARD_BASE: u64 = 100_000;
+
+    pub fn is_valid_metadata_length(length: u32) -> bool {
+        length <= MAX_METADATA_LENGTH
+    }
+
+    pub fn is_valid_version_encoding(version: &str) -> bool {
+        let bytes = version.as_bytes();
+        if bytes.len() < 2 || bytes.len() > 10 {
+            return false;
+        }
+        if bytes[0] != b'v' || !bytes[1..].iter().all(|byte| byte.is_ascii_digit()) {
+            return false;
+        }
+        bytes.len() == 2 || bytes[1] != b'0'
+    }
 
     /// Sets and validates the reward base configuration parameter ensuring it falls
     /// strictly within the 1 to 100,000 allowable range.
