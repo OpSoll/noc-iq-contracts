@@ -64,9 +64,16 @@ Soroban automatically extends the TTL of instance storage entries when they are 
 To prevent unbounded storage growth:
 1. **Configurable Retention**: The `RETLIM` key controls the maximum number of history entries (default: 1000)
 2. **Automatic Pruning**: When `calculate_sla` is called and history exceeds the retention limit, the oldest entry is dropped
-3. **Admin-Controlled Pruning**: Admins can manually prune history using:
-   - `prune_history(keep_latest: u32)` - Prune to keep only the N most recent entries
-   - `prune_history_by_age(min_age_seconds: u64)` - Remove entries older than the specified age
+ 3. **Admin-Controlled Pruning**: Admins can manually prune history using:
+    - `prune_history(keep_latest: u32)` - Prune to keep only the N most recent entries
+    - `prune_history_by_age(min_age_seconds: u64)` - Remove entries older than the specified age
+
+Config version history is bounded by `MAX_HISTORY_ENTRIES = 20` in
+`sla_calculator/src/config_history_retention.rs`. Pruning never removes the active revision, even
+when it is the oldest retained record at the boundary, and calling `prune_config_history` again
+with the same active revision is a no-op. Clients can read it with `active_config_revision`.
+Tests cover revisions immediately before (19), at (20), and after (21) the cutoff.
+
 
 ---
 
