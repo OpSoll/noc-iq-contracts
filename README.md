@@ -330,3 +330,103 @@ Backend operators should treat a renounced contract as immutable from a governan
 
 - `noc-iq-fe` -> frontend application
 - `noc-iq-be` -> backend and contract bridge
+
+
+# NOC IQ Smart Contracts
+
+Soroban contract repository for the NOC IQ system.
+
+This repository is the execution-layer side of the 3-repo architecture:
+
+- `noc-iq-fe` -> frontend
+- `noc-iq-be` -> backend and integration layer
+- `noc-iq-contracts` -> Soroban smart contracts
+
+System flow:
+
+`User -> FE -> BE -> Contracts -> BE -> FE`
+
+Important rule:
+
+- contracts are not called directly by the frontend
+- the backend is responsible for invoking contracts and translating results back to the UI
+
+## Overview
+
+`noc-iq-contracts` contains the Soroban-side SLA logic for NOC IQ.
+
+The repository is organized as a top-level Cargo workspace (`Cargo.toml`) whose active contract crate is:
+
+- `sla_calculator` (`sla_calculator/Cargo.toml`)
+
+This contract is responsible for deterministic SLA calculation and related contract-side state such as configuration, statistics, pause state, and calculation history.
+
+## Current Stack
+
+- Rust
+- Soroban SDK 21
+- Cargo (top-level workspace in `Cargo.toml`)
+
+Main crate manifest:
+
+- `sla_calculator/Cargo.toml`
+
+## Current Contract Surface
+
+The active contract is in:
+
+- `sla_calculator/src/lib.rs`
+
+The current implementation includes:
+
+- initialization with admin and operator roles
+- severity-based SLA configuration
+- admin-controlled config updates
+- operator-gated `calculate_sla`
+- read-only `calculate_sla_view`
+- backend-friendly `get_config_snapshot`
+- pause and unpause controls
+- cumulative SLA statistics
+- history retrieval and pruning
+
+Tests live in:
+
+- `sla_calculator/src/tests.rs`
+
+## Project Structure
+
+```text
+noc-iq-contracts/
+├── .github/
+│   └── workflows/
+│       ├── ci.yml           # build, test, clippy, no-std check, WASM size
+│       ├── release-hash.yml # WASM SHA-256 manifest for reproducibility
+│       └── security.yml     # cargo-audit dependency advisory scan
+├── artifacts/               # deployment and contract metadata artifacts
+├── docs/                    # architecture docs and context files
+│   ├── CODEX_CONTEXT.md
+│   ├── PROJECT_CONTEXT.md
+│   ├── config-validation.md
+│   ├── contract-module-map.md
+│   ├── contributor-verification-guide.md
+│   ├── sc-w5-storage-and-cost-baselines.md
+│   └── storage-layout-and-ttl.md # Detailed storage keys, types, and TTL management
+├── offchain/                # TypeScript off-chain integration helpers
+├── pers-store/              # persistent storage helpers
+├── scripts/                 # deployment, migration, and tooling scripts
+│   ├── deploy-testnet.sh
+│   └── deploy-multi-network.sh
+├── sla_calculator/          # main Soroban contract crate
+│   ├── Cargo.toml
+│   └── src/
+│       ├── lib.rs           # contract entry point
+│       ├── tests.rs         # unit and integration tests
+│       └── (module files)   # event schema, cross-contract safety, etc.
+├── tests/                   # TypeScript parity and integration tests
+├── tooling/                 # CI tooling and governance helpers
+├── tools/                   # developer utility scripts
+├── ts/                      # TypeScript contract interface helpers
+├── Cargo.toml               # workspace manifest
+├── CHANGELOG.md
+├── CONTRIBUTING.md
+└── README.md
