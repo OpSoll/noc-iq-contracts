@@ -456,3 +456,115 @@ mod threshold_tests {
         assert_eq!(viol.status, symbol_short!("viol"));
     }
 }
+
+#[cfg(test)]
+mod threshold_bound_rejection_tests {
+    use super::*;
+    use crate::threshold_bounds::{MAX_THRESHOLD_MINUTES, MIN_THRESHOLD_MINUTES};
+    use crate::{SLACalculatorContract, SLACalculatorContractClient};
+    use soroban_sdk::{symbol_short, testutils::Address as _, Address, Env};
+
+    fn setup(env: &Env) -> (Address, SLACalculatorContractClient) {
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, SLACalculatorContract);
+        let client = SLACalculatorContractClient::new(env, &contract_id);
+        let admin = Address::generate(env);
+        client.initialize(&admin, &Address::generate(env));
+        (admin, client)
+    }
+
+    #[test]
+    fn a_below_minimum_threshold_reports_the_lower_bound() {
+        let env = Env::default();
+        let (admin, client) = setup(&env);
+        let severity = symbol_short!("critical");
+        let current = client.get_config(&severity);
+
+        let result = client.try_set_config(
+            &admin,
+            &severity,
+            &(MIN_THRESHOLD_MINUTES - 1),
+            &current.penalty_per_minute,
+            &current.reward_base,
+            &current.top_tier_multiplier,
+            &current.excel_tier_multiplier,
+            &current.good_tier_multiplier,
+        );
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            SLAError::ThresholdBelowMinimum
+        );
+        assert_eq!(SLAError::ThresholdBelowMinimum as u32, 25);
+        // The rejected update never mutates the stored configuration.
+        assert_eq!(client.get_config(&severity).threshold_minutes, 15);
+    }
+
+    #[test]
+    fn an_above_maximum_threshold_reports_the_upper_bound() {
+        let env = Env::default();
+        let (admin, client) = setup(&env);
+        let severity = symbol_short!("low");
+        let current = client.get_config(&severity);
+
+        let result = client.try_set_config(
+            &admin,
+            &severity,
+            &(MAX_THRESHOLD_MINUTES + 1),
+            &current.penalty_per_minute,
+            &current.reward_base,
+            &current.top_tier_multiplier,
+            &current.excel_tier_multiplier,
+            &current.good_tier_multiplier,
+        );
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            SLAError::ThresholdAboveMaximum
+        );
+        assert_eq!(SLAError::ThresholdAboveMaximum as u32, 26);
+        assert_eq!(client.get_config(&severity).threshold_minutes, 120);
+    }
+
+    #[test]
+    fn the_inclusive_bounds_are_still_accepted() {
+        let env = Env::default();
+        let (admin, client) = setup(&env);
+
+        let critical = symbol_short!("critical");
+        let current = client.get_config(&critical);
+        assert!(client
+            .try_set_config(
+                &admin,
+                &critical,
+                &MIN_THRESHOLD_MINUTES,
+                &current.penalty_per_minute,
+                &current.reward_base,
+                &current.top_tier_multiplier,
+                &current.excel_tier_multiplier,
+                &current.good_tier_multiplier,
+            )
+            .is_ok());
+        assert_eq!(
+            client.get_config(&critical).threshold_minutes,
+            MIN_THRESHOLD_MINUTES
+        );
+
+        let low = symbol_short!("low");
+        let current = client.get_config(&low);
+        assert!(client
+            .try_set_config(
+                &admin,
+                &low,
+                &MAX_THRESHOLD_MINUTES,
+                &current.penalty_per_minute,
+                &current.reward_base,
+                &current.top_tier_multiplier,
+                &current.excel_tier_multiplier,
+                &current.good_tier_multiplier,
+            )
+            .is_ok());
+        assert_eq!(
+            client.get_config(&low).threshold_minutes,
+            MAX_THRESHOLD_MINUTES
+        );
+    }
+}

@@ -20,9 +20,10 @@ The contract only supports four severity levels:
 ### General Rules (Apply to All Severities)
 
 #### Threshold Minutes
-- **Range**: 1 to 1440 minutes (24 hours maximum)
+- **Range**: 1 to 1440 minutes (24 hours maximum), both bounds inclusive
 - **Purpose**: Prevents unrealistic thresholds (0 minutes) or extremely long thresholds
-- **Error**: `InvalidThreshold` (error code 8)
+- **Error**: `ThresholdBelowMinimum` (error code 25) when the value is below 1 minute,
+  `ThresholdAboveMaximum` (error code 26) when it exceeds 1440 minutes
 
 #### Penalty Per Minute
 - **Range**: 1 to 10,000 units per minute
@@ -61,7 +62,9 @@ The contract only supports four severity levels:
 
 | Error Code | Error Name | Description |
 |------------|------------|-------------|
-| 8 | InvalidThreshold | Threshold minutes outside valid range or severity-specific limits |
+| 8 | InvalidThreshold | Threshold minutes outside severity-specific limits (cross-severity ordering) |
+| 25 | ThresholdBelowMinimum | Threshold minutes below the lower bound (1 minute) |
+| 26 | ThresholdAboveMaximum | Threshold minutes above the upper bound (1440 minutes) |
 | 9 | InvalidPenalty | Penalty per minute outside valid range or severity-specific limits |
 | 10 | InvalidReward | Reward base outside valid range |
 | 11 | InvalidSeverity | Severity not in supported list (critical, high, medium, low) |

@@ -7032,7 +7032,7 @@ fn test_error_unauthorized_operator_calling_admin_fn_is_terminal() {
 #[test]
 fn test_error_invalid_threshold_is_terminal() {
     let (_env, client, actors) = setup();
-    // threshold=0 is always invalid for any severity
+    // threshold=0 is always invalid for any severity; #1040 reports the bound
     let result = client.try_set_config(
         &actors.admin,
         &symbol_short!("low"),
@@ -7043,7 +7043,7 @@ fn test_error_invalid_threshold_is_terminal() {
         &150,
         &100,
     );
-    assert_eq!(result.unwrap_err().unwrap(), SLAError::ThresholdOutOfBounds);
+    assert_eq!(result.unwrap_err().unwrap(), SLAError::ThresholdBelowMinimum);
 }
 
 #[test]

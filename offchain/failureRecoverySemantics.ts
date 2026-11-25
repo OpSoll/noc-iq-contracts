@@ -104,6 +104,9 @@ const FAILURE_CLASSES: Record<string, FailureClass> = {
   CONFIG_LOCKED: "permanent_config",
   // the request itself
   InvalidThreshold: "permanent_request",
+  // #1040 — bound-specific threshold rejections are still caller errors.
+  ThresholdBelowMinimum: "permanent_request",
+  ThresholdAboveMaximum: "permanent_request",
   InvalidSeverity: "permanent_request",
   InvalidOutageId: "permanent_request",
   DuplicateOutageInput: "permanent_request",
