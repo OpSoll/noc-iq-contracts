@@ -142,6 +142,7 @@ exports a new method**. Only the first column (the backticked method name) is ma
 | `cancel_admin_proposal` | lib.rs | Admin |  |
 | `get_pending_admin` | lib.rs | Public read | Drops an expired proposal as a side effect |
 | `get_pending_operator` | lib.rs | Public read | Drops an expired proposal as a side effect |
+| `get_operator_state` | lib.rs / operator_query.rs | Public read | Active and pending operator reported separately; read-only (#1011) |
 | `propose_operator` | lib.rs | Admin | Two-step operator change, step 1 |
 | `accept_operator` | lib.rs | Pending operator | Two-step operator change, step 2 |
 | `cancel_operator_proposal` | lib.rs | Admin |  |

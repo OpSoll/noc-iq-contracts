@@ -21,6 +21,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - `SubMinutePrecision` — sub-minute fixed-point availability helper that preserves three decimal places and cannot overflow on large durations (#663)
 - `event_schema::validate_timestamp_sequence` / `event_schema::ingest_outage_event` — non-monotonic timestamp guard for outage ingestion (#664)
 - `trend::record_outage_close` / `trend::get_rolling_sla_bps` / `trend::get_rolling_uptime_window` — rolling 30-day cumulative uptime window with automatic eviction (#665)
+- `get_operator_state` — returns `OperatorRoleState { current, pending, pending_expires_at }` so off-chain tooling can tell the active operator apart from a pending (unaccepted) operator transfer; read-only, expired proposals report `pending: None` (#1011)
+- `operator_query` / `operator_transfer` modules are now compiled into the crate; `operator_transfer::require_active_operator` rejects a pending operator until it accepts (#1011)
 
 ### Changed
 - `get_stats` now returns a `SLAStats` struct; callers should use field access rather than tuple destructuring
