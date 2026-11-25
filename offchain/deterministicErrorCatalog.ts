@@ -44,6 +44,9 @@ export const errorCatalog: CatalogEntry[] = [
   { code: "INVALID_MONTH", contractCode: 22, contractName: "InvalidMonth", message: "The month is invalid.", retryable: false, bridgeFacing: true },
   { code: "INVALID_TIMESTAMP_SEQUENCE", contractCode: 23, contractName: "InvalidTimestampSequence", message: "Outage timestamps are out of order.", retryable: false, bridgeFacing: true },
   { code: "DIVISION_BY_ZERO", contractCode: 24, contractName: "DivisionByZero", message: "A calculation would divide by zero.", retryable: false, bridgeFacing: true },
+  // #1040 — out-of-range SLA thresholds name the bound that rejected them.
+  { code: "THRESHOLD_BELOW_MINIMUM", contractCode: 25, contractName: "ThresholdBelowMinimum", message: "The SLA threshold is below the minimum of 1 minute.", retryable: false, bridgeFacing: true },
+  { code: "THRESHOLD_ABOVE_MAXIMUM", contractCode: 26, contractName: "ThresholdAboveMaximum", message: "The SLA threshold exceeds the maximum of 1440 minutes.", retryable: false, bridgeFacing: true },
 ];
 
 export function lookupError(code: ErrorCode): CatalogEntry | undefined {

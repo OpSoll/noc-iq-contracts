@@ -187,6 +187,8 @@ pub enum SLAError {
     InvalidMonth = 22,
     InvalidTimestampSequence = 23, // #664 – out-of-order outage ingestion
     DivisionByZero = 24,           // #663 – zero-denominator SLA precision math
+    ThresholdBelowMinimum = 25,    // #1040 – rejected by the lower threshold bound
+    ThresholdAboveMaximum = 26,    // #1040 – rejected by the upper threshold bound
 }
 
 // -----------------------------------------------------------------------
@@ -1087,7 +1089,7 @@ impl SLACalculatorContract {
 
         // Emit in numeric order for deterministic consumption
         // All descriptions must be <= 32 bytes (Soroban Symbol constraint)
-        let entries: [(u32, &str, &str); 24] = [
+        let entries: [(u32, &str, &str); 26] = [
             (1, "AlreadyInitialized", "Contract already initialized"),
             (2, "NotInitialized", "Contract not yet initialized"),
             (3, "Unauthorized", "Caller lacks required role"),
@@ -1116,6 +1118,16 @@ impl SLACalculatorContract {
             (22, "InvalidMonth", "Month out of range"),
             (23, "InvalidTimestampSequence", "Timestamps out of order"),
             (24, "DivisionByZero", "Division by zero attempted"),
+            (
+                25,
+                "ThresholdBelowMinimum",
+                "Threshold below allowed minimum",
+            ),
+            (
+                26,
+                "ThresholdAboveMaximum",
+                "Threshold above allowed maximum",
+            ),
         ];
 
         for (code, label, description) in entries {
@@ -1837,10 +1849,11 @@ impl SLACalculatorContract {
             return Err(SLAError::InvalidSeverity);
         }
 
-        // Threshold must be between 1 and 1440 minutes (24 hours max)
-        if threshold_minutes == 0 || threshold_minutes > 1440 {
-            return Err(SLAError::ThresholdOutOfBounds);
-        }
+        // Threshold must be between 1 and 1440 minutes (24 hours max).
+        // #1040 — the returned error names the bound that rejected the value
+        // so operator tooling can distinguish too-small from too-large.
+        crate::threshold_bounds::validate_threshold_minutes(env, threshold_minutes)
+            .map_err(|rejection| rejection.to_sla_error())?;
 
         // Penalty must be positive and reasonable (1 to 10000 per minute)
         if penalty_per_minute <= 0 || penalty_per_minute > 10000 {
