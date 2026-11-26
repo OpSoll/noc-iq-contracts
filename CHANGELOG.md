@@ -21,8 +21,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - `SubMinutePrecision` — sub-minute fixed-point availability helper that preserves three decimal places and cannot overflow on large durations (#663)
 - `event_schema::validate_timestamp_sequence` / `event_schema::ingest_outage_event` — non-monotonic timestamp guard for outage ingestion (#664)
 - `trend::record_outage_close` / `trend::get_rolling_sla_bps` / `trend::get_rolling_uptime_window` — rolling 30-day cumulative uptime window with automatic eviction (#665)
-- `get_operator_state` — returns `OperatorRoleState { current, pending, pending_expires_at }` so off-chain tooling can tell the active operator apart from a pending (unaccepted) operator transfer; read-only, expired proposals report `pending: None` (#1011)
-- `operator_query` / `operator_transfer` modules are now compiled into the crate; `operator_transfer::require_active_operator` rejects a pending operator until it accepts (#1011)
+- `deprecation::DeprecationWindow` / `set_field_deprecation_window` / `check_field_usage` — ledger-bounded compatibility window for deprecated configuration fields: legacy fields are accepted only before `removal_ledger` (deprecated from `activation_ledger`, inclusive) and replacement fields only from `activation_ledger`; `deprecation` module is now compiled into the crate; new `DeprecationError` variants `InvalidWindow` (2), `LegacyFieldRemoved` (3), `ReplacementNotActive` (4), `WindowNotFound` (5) (#1014)
 
 ### Changed
 - `get_stats` now returns a `SLAStats` struct; callers should use field access rather than tuple destructuring
