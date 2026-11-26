@@ -76,8 +76,8 @@ pub mod config_bundle;
 pub mod config_bundle_atomic_update;
 pub mod config_compatibility_check;
 pub mod init_guard;
-pub mod operator_query;
-pub mod operator_transfer;
+pub mod multi_operator; // #1013
+pub mod dao_admin_takeover; // #1013
 // -----------------------------------------------------------------------
 // Storage keys
 // -----------------------------------------------------------------------
