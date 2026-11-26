@@ -28,6 +28,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - `get_stats` now returns a `SLAStats` struct; callers should use field access rather than tuple destructuring
 - History entries returned by `get_history` include `schema_version` for result envelope versioning
 
+### Fixed
+- `operator_transfer::accept_operator` / `admin_transfer::accept_admin` — an address from a superseded proposal is rejected (`NotPendingOperator` / `NotPendingAdmin`) before any storage is written or removed, including the cleanup of an expired proposal; re-proposing overwrites the single pending proposal, and the current proposal can be accepted exactly once (#1012)
+
 ---
 
 ## [0.3.0] — Operator role and pause controls

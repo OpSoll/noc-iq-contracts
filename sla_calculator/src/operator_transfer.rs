@@ -1,9 +1,12 @@
-//! Two-step operator handoff helpers (#64, #1011).
+//! Two-step operator handoff helpers (#64, #1011, #1012).
 //!
 //! Storage layout matches the contract entrypoints in `lib.rs`: the pending
 //! proposal is a `PendingProposalInfo` under `POP`, and the active operator is
 //! the address under `OPERATOR`. A pending operator holds no operator rights
 //! until it accepts; `require_active_operator` is the gate for that.
+//!
+//! There is only ever one proposal: a new `propose_operator` overwrites it, so
+//! an address from a superseded proposal can no longer accept (#1012).
 
 use soroban_sdk::{symbol_short, Address, Env, Symbol};
 
@@ -55,20 +58,27 @@ pub fn propose_operator(
 }
 
 /// The proposed operator accepts the role, replacing the current operator.
+///
+/// #1012: only the address in the *current* proposal can accept. A new
+/// `propose_operator` overwrites the single stored proposal, so an address
+/// from an earlier (superseded) proposal is rejected with
+/// `NotPendingOperator` and leaves storage untouched: the caller is checked
+/// before anything is written or removed, including the cleanup of an
+/// expired proposal. A successful accept clears the proposal, so the same
+/// proposal cannot be accepted twice.
 pub fn accept_operator(env: &Env, new_operator: &Address) -> Result<(), OperatorTransferError> {
     new_operator.require_auth();
-    if !env.storage().instance().has(&PENDING_OP_KEY) {
-        return Err(OperatorTransferError::NoPendingProposal);
-    }
-    let proposal = match live_pending_proposal(env) {
-        Some(p) => p,
-        None => {
-            env.storage().instance().remove(&PENDING_OP_KEY);
-            return Err(OperatorTransferError::ProposalExpired);
-        }
-    };
+    let proposal: PendingProposalInfo = env
+        .storage()
+        .instance()
+        .get(&PENDING_OP_KEY)
+        .ok_or(OperatorTransferError::NoPendingProposal)?;
     if &proposal.target != new_operator {
         return Err(OperatorTransferError::NotPendingOperator);
+    }
+    if live_pending_proposal(env).is_none() {
+        env.storage().instance().remove(&PENDING_OP_KEY);
+        return Err(OperatorTransferError::ProposalExpired);
     }
     env.storage().instance().set(&OPERATOR_KEY, new_operator);
     env.storage().instance().remove(&PENDING_OP_KEY);
@@ -220,5 +230,155 @@ mod tests {
                 Some(roles.operator.clone())
             );
         });
+    }
+
+    fn stored_proposal(env: &Env) -> Option<PendingProposalInfo> {
+        env.storage().instance().get(&PENDING_OP_KEY)
+    }
+
+    /// #1012: once a proposal is replaced, the earlier address is rejected
+    /// and nothing in operator storage changes.
+    #[test]
+    fn superseded_operator_cannot_accept_and_state_is_unchanged() {
+        let (env, cid, roles) = harness();
+        let superseded = Address::generate(&env);
+        let run = |f: &dyn Fn()| env.as_contract(&cid, f);
+
+        env.ledger().with_mut(|l| l.timestamp = 10);
+        run(&|| propose_operator(&env, &roles.admin, superseded.clone()).unwrap());
+        env.ledger().with_mut(|l| l.timestamp = 20);
+        run(&|| propose_operator(&env, &roles.admin, roles.successor.clone()).unwrap());
+
+        run(&|| {
+            let before = stored_proposal(&env);
+            assert_eq!(
+                before,
+                Some(PendingProposalInfo {
+                    target: roles.successor.clone(),
+                    proposed_at: 20,
+                }),
+                "a new proposal must overwrite the previous one"
+            );
+            assert_eq!(
+                accept_operator(&env, &superseded),
+                Err(OperatorTransferError::NotPendingOperator)
+            );
+            assert_eq!(stored_proposal(&env), before);
+            let state = get_operator_state(&env);
+            assert_eq!(state.current, Some(roles.operator.clone()));
+            assert_eq!(state.pending, Some(roles.successor.clone()));
+            assert_eq!(
+                require_active_operator(&env, &superseded),
+                Err(OperatorTransferError::NotActiveOperator)
+            );
+        });
+    }
+
+    /// #1012: the current proposal is accepted once; any later accept, by it
+    /// or by the superseded address, fails without changing the operator.
+    #[test]
+    fn current_proposal_accepts_exactly_once() {
+        let (env, cid, roles) = harness();
+        let superseded = Address::generate(&env);
+        let run = |f: &dyn Fn()| env.as_contract(&cid, f);
+
+        run(&|| propose_operator(&env, &roles.admin, superseded.clone()).unwrap());
+        run(&|| propose_operator(&env, &roles.admin, roles.successor.clone()).unwrap());
+        run(&|| {
+            assert_eq!(
+                accept_operator(&env, &superseded),
+                Err(OperatorTransferError::NotPendingOperator)
+            );
+        });
+        run(&|| assert_eq!(accept_operator(&env, &roles.successor), Ok(())));
+        run(&|| {
+            assert_eq!(stored_proposal(&env), None);
+            assert_eq!(
+                accept_operator(&env, &roles.successor),
+                Err(OperatorTransferError::NoPendingProposal)
+            );
+        });
+        run(&|| {
+            assert_eq!(
+                accept_operator(&env, &superseded),
+                Err(OperatorTransferError::NoPendingProposal)
+            );
+            let state = get_operator_state(&env);
+            assert_eq!(state.current, Some(roles.successor.clone()));
+            assert_eq!(state.pending, None);
+        });
+    }
+
+    /// #1012: a superseded address cannot even clear an expired proposal;
+    /// only the proposed operator's own call drops it.
+    #[test]
+    fn superseded_operator_does_not_clear_an_expired_proposal() {
+        let (env, cid, roles) = harness();
+        let superseded = Address::generate(&env);
+        let run = |f: &dyn Fn()| env.as_contract(&cid, f);
+
+        env.ledger().with_mut(|l| l.timestamp = 100);
+        run(&|| propose_operator(&env, &roles.admin, superseded.clone()).unwrap());
+        run(&|| propose_operator(&env, &roles.admin, roles.successor.clone()).unwrap());
+        env.ledger()
+            .with_mut(|l| l.timestamp = 100 + PROPOSAL_EXPIRATION_SECONDS + 1);
+
+        run(&|| {
+            assert_eq!(
+                accept_operator(&env, &superseded),
+                Err(OperatorTransferError::NotPendingOperator)
+            );
+            assert!(env.storage().instance().has(&PENDING_OP_KEY));
+        });
+        run(&|| {
+            assert_eq!(
+                accept_operator(&env, &roles.successor),
+                Err(OperatorTransferError::ProposalExpired)
+            );
+            assert!(!env.storage().instance().has(&PENDING_OP_KEY));
+            assert_eq!(
+                get_operator_state(&env).current,
+                Some(roles.operator.clone())
+            );
+        });
+    }
+
+    /// #1012 through the contract entrypoints: the superseded address gets
+    /// `Unauthorized`, the current one accepts once, then `NoPendingTransfer`.
+    #[test]
+    fn entrypoints_reject_superseded_operator_and_double_accept() {
+        let env = Env::default();
+        let cid = env.register_contract(None, SLACalculatorContract);
+        let client = crate::SLACalculatorContractClient::new(&env, &cid);
+        let admin = Address::generate(&env);
+        let operator = Address::generate(&env);
+        let superseded = Address::generate(&env);
+        let latest = Address::generate(&env);
+        client.initialize(&admin, &operator);
+
+        client.propose_operator(&admin, &superseded);
+        client.propose_operator(&admin, &latest);
+
+        assert_eq!(
+            client.try_accept_operator(&superseded),
+            Err(Ok(crate::SLAError::Unauthorized))
+        );
+        assert_eq!(client.get_operator(), operator);
+        let state = client.get_operator_state();
+        assert_eq!(state.current, Some(operator.clone()));
+        assert_eq!(state.pending, Some(latest.clone()));
+
+        client.accept_operator(&latest);
+        assert_eq!(client.get_operator(), latest);
+        assert_eq!(
+            client.try_accept_operator(&latest),
+            Err(Ok(crate::SLAError::NoPendingTransfer))
+        );
+        assert_eq!(
+            client.try_accept_operator(&superseded),
+            Err(Ok(crate::SLAError::NoPendingTransfer))
+        );
+        assert_eq!(client.get_operator(), latest);
+        assert_eq!(client.get_operator_state().pending, None);
     }
 }

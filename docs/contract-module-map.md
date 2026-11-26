@@ -144,7 +144,7 @@ exports a new method**. Only the first column (the backticked method name) is ma
 | `get_pending_operator` | lib.rs | Public read | Drops an expired proposal as a side effect |
 | `get_operator_state` | lib.rs / operator_query.rs | Public read | Active and pending operator reported separately; read-only (#1011) |
 | `propose_operator` | lib.rs | Admin | Two-step operator change, step 1 |
-| `accept_operator` | lib.rs | Pending operator | Two-step operator change, step 2 |
+| `accept_operator` | lib.rs | Pending operator | Two-step operator change, step 2; only the latest proposal can accept, a superseded address gets `Unauthorized` (#1012) |
 | `cancel_operator_proposal` | lib.rs | Admin |  |
 | `renounce_admin` | lib.rs | Admin | Irreversible |
 | `pause` | lib.rs | Admin | Blocks `calculate_sla`; see `pause_action.rs` |
