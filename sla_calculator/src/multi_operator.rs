@@ -1,6 +1,4 @@
-#![no_std]
-
-use soroban_sdk::{contracterror, contracttype, symbol_short, Address, Env, Map, Symbol};
+use soroban_sdk::{contracttype, symbol_short, Address, Env, Map, Symbol, Vec};
 
 use crate::{SLAError, ADMIN_KEY};
 
@@ -8,7 +6,10 @@ use crate::{SLAError, ADMIN_KEY};
 // Storage keys
 // -----------------------------------------------------------------------
 const OPERATORS_KEY: Symbol = symbol_short!("OPER");
-const PENDING_OP_KEY: Symbol = symbol_short!("POP");
+/// Membership epoch: bumped on every effective add/remove (#1013).
+const MEMBER_EPOCH_KEY: Symbol = symbol_short!("OPEPOCH");
+/// Epoch at which each operator last joined the set (#1013).
+const JOINED_EPOCH_KEY: Symbol = symbol_short!("OPJOIN");
 
 // -----------------------------------------------------------------------
 // Events
@@ -46,6 +47,38 @@ pub fn init_operators(env: &Env, operator: &Address) {
             count: 1,
         },
     );
+    let mut joined = Map::<Address, u32>::new(env);
+    joined.set(operator.clone(), 0);
+    env.storage().instance().set(&MEMBER_EPOCH_KEY, &0u32);
+    env.storage().instance().set(&JOINED_EPOCH_KEY, &joined);
+}
+
+/// Current membership epoch. Starts at 0 and increases by one on every
+/// effective operator addition or removal, so any vote weight recorded
+/// against an older epoch can be detected as stale (#1013).
+pub fn membership_epoch(env: &Env) -> u32 {
+    env.storage().instance().get(&MEMBER_EPOCH_KEY).unwrap_or(0)
+}
+
+/// Epoch at which `operator` most recently joined the operator set, or
+/// `None` if it is not currently an operator (#1013).
+pub fn joined_epoch(env: &Env, operator: &Address) -> Option<u32> {
+    let state: OperatorState = env.storage().instance().get(&OPERATORS_KEY)?;
+    if !state.operators.get(operator.clone()).unwrap_or(false) {
+        return None;
+    }
+    let joined: Map<Address, u32> = env
+        .storage()
+        .instance()
+        .get(&JOINED_EPOCH_KEY)
+        .unwrap_or(Map::new(env));
+    Some(joined.get(operator.clone()).unwrap_or(0))
+}
+
+fn bump_membership_epoch(env: &Env) -> u32 {
+    let next = membership_epoch(env).saturating_add(1);
+    env.storage().instance().set(&MEMBER_EPOCH_KEY, &next);
+    next
 }
 
 /// Check if the caller is an authorized operator.
@@ -73,11 +106,7 @@ pub fn is_operator(env: &Env, caller: &Address) -> Result<(), SLAError> {
 ///
 /// # Errors
 /// Returns `Unauthorized` if caller is not admin.
-pub fn add_operator(
-    env: &Env,
-    caller: &Address,
-    new_operator: &Address,
-) -> Result<(), SLAError> {
+pub fn add_operator(env: &Env, caller: &Address, new_operator: &Address) -> Result<(), SLAError> {
     let admin: Address = env
         .storage()
         .instance()
@@ -102,6 +131,15 @@ pub fn add_operator(
     state.count = state.count.saturating_add(1);
     env.storage().instance().set(&OPERATORS_KEY, &state);
 
+    let epoch = bump_membership_epoch(env);
+    let mut joined: Map<Address, u32> = env
+        .storage()
+        .instance()
+        .get(&JOINED_EPOCH_KEY)
+        .unwrap_or(Map::new(env));
+    joined.set(new_operator.clone(), epoch);
+    env.storage().instance().set(&JOINED_EPOCH_KEY, &joined);
+
     env.events().publish(
         (EVENT_OP_ADD, EVENT_VERSION, caller),
         (new_operator.clone(),),
@@ -121,11 +159,7 @@ pub fn add_operator(
 ///
 /// # Errors
 /// Returns `Unauthorized` if caller is not admin.
-pub fn remove_operator(
-    env: &Env,
-    caller: &Address,
-    operator: &Address,
-) -> Result<(), SLAError> {
+pub fn remove_operator(env: &Env, caller: &Address, operator: &Address) -> Result<(), SLAError> {
     let admin: Address = env
         .storage()
         .instance()
@@ -149,11 +183,10 @@ pub fn remove_operator(
     state.operators.set(operator.clone(), false);
     state.count = state.count.saturating_sub(1);
     env.storage().instance().set(&OPERATORS_KEY, &state);
+    bump_membership_epoch(env);
 
-    env.events().publish(
-        (EVENT_OP_REM, EVENT_VERSION, caller),
-        (operator.clone(),),
-    );
+    env.events()
+        .publish((EVENT_OP_REM, EVENT_VERSION, caller), (operator.clone(),));
 
     Ok(())
 }

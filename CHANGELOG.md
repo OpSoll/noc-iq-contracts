@@ -26,6 +26,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Changed
 - `get_stats` now returns a `SLAStats` struct; callers should use field access rather than tuple destructuring
 - History entries returned by `get_history` include `schema_version` for result envelope versioning
+- `dao_admin_takeover` and `multi_operator` are now compiled into the crate; `multi_operator` no longer declares a stray `#![no_std]`, imports `soroban_sdk::Vec`, and drops an unused `POP` key constant (#1013)
 
 ---
 
