@@ -41,6 +41,7 @@ pub mod state_snapshot;
 pub mod storage_migration;
 pub mod storage_ttl_recovery;
 pub mod dependency_propagation;
+pub mod deprecation;
 pub mod event_correlation;
 pub mod event_log_compaction;
 pub mod severity_enum;
