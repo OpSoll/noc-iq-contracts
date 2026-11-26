@@ -28,6 +28,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - History entries returned by `get_history` include `schema_version` for result envelope versioning
 - `dao_admin_takeover` and `multi_operator` are now compiled into the crate; `multi_operator` no longer declares a stray `#![no_std]`, imports `soroban_sdk::Vec`, and drops an unused `POP` key constant (#1013)
 
+### Fixed
+- `operator_transfer::accept_operator` / `admin_transfer::accept_admin` — an address from a superseded proposal is rejected (`NotPendingOperator` / `NotPendingAdmin`) before any storage is written or removed, including the cleanup of an expired proposal; re-proposing overwrites the single pending proposal, and the current proposal can be accepted exactly once (#1012)
+
 ---
 
 ## [0.3.0] — Operator role and pause controls

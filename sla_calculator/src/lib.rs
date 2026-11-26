@@ -736,6 +736,18 @@ impl SLACalculatorContract {
         Ok(None)
     }
 
+    /// #1011 – Active and pending operator identities as separate fields.
+    ///
+    /// `current` is the only address accepted by operator-gated entrypoints;
+    /// `pending` is a proposed operator that has not called `accept_operator`
+    /// yet and holds no operator rights. Expired proposals are reported as
+    /// absent. Read-only: unlike `get_pending_operator`, this never removes an
+    /// expired proposal from storage.
+    pub fn get_operator_state(env: Env) -> Result<operator_query::OperatorRoleState, SLAError> {
+        Self::check_version(&env)?;
+        Ok(operator_query::get_operator_state(&env))
+    }
+
     // -------------------------------------------------------------------
     // #64 – Two-step operator handoff
     // -------------------------------------------------------------------
@@ -1738,6 +1750,9 @@ impl SLACalculatorContract {
     }
 
     /// #28 – Ensures the caller holds the operator role.
+    ///
+    /// #1011: only the active operator passes. A pending operator from an
+    /// unaccepted `propose_operator` is rejected with `Unauthorized`.
     fn require_operator(env: &Env, caller: &Address) -> Result<(), SLAError> {
         let operator: Address = env
             .storage()
