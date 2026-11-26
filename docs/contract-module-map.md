@@ -45,6 +45,17 @@ Add a test for every new function or edge case.
 
 ---
 
+### `sla_calculator/src/dao_admin_takeover.rs` and `multi_operator.rs`
+**Owner:** contracts-core  
+**Responsibility:** Emergency DAO admin takeover (propose / approve / execute)
+voted on by the multi-operator set. `multi_operator.rs` owns operator
+membership and bumps a membership epoch on every add/remove; execution
+recomputes the eligible voter set and quorum (strict majority) from live
+membership and ignores approvals from addresses that left the set (#1013).
+Internal modules only: no `#[contractimpl]` entrypoints yet.
+
+---
+
 ### `offchain/`
 **Owner:** backend-integration  
 **Responsibility:** TypeScript helpers that the backend calls to validate

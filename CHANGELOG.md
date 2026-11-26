@@ -21,10 +21,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - `SubMinutePrecision` — sub-minute fixed-point availability helper that preserves three decimal places and cannot overflow on large durations (#663)
 - `event_schema::validate_timestamp_sequence` / `event_schema::ingest_outage_event` — non-monotonic timestamp guard for outage ingestion (#664)
 - `trend::record_outage_close` / `trend::get_rolling_sla_bps` / `trend::get_rolling_uptime_window` — rolling 30-day cumulative uptime window with automatic eviction (#665)
+- `dao_admin_takeover::propose_admin_takeover` / `approve_admin_takeover` / `execute_admin_takeover` — operator-voted DAO admin takeover whose execution revalidates the current eligible voter set and quorum; `TakeoverError::QuorumNotMet` (5) when fresh approval weight is short (#1013)
+- `multi_operator::membership_epoch` / `multi_operator::joined_epoch` — membership epoch bumped on every operator add/remove, used to drop stale approval weight (#1013)
 
 ### Changed
 - `get_stats` now returns a `SLAStats` struct; callers should use field access rather than tuple destructuring
 - History entries returned by `get_history` include `schema_version` for result envelope versioning
+- `dao_admin_takeover` and `multi_operator` are now compiled into the crate; `multi_operator` no longer declares a stray `#![no_std]`, imports `soroban_sdk::Vec`, and drops an unused `POP` key constant (#1013)
 
 ---
 
