@@ -127,3 +127,41 @@ Off-chain clients should read `get_version_info()` (storage and result schema ve
 decoding state, and treat `storage_version` or `result_schema_version` higher than the version
 they were built for as "cannot decode safely".
 
+
+## Deprecated Configuration Fields
+
+When a configuration field is renamed or replaced, the old spelling (the *legacy* field) and the new
+one (the *replacement* field) are governed by a `DeprecationWindow` registered per field with
+`set_field_deprecation_window` in `sla_calculator/src/deprecation.rs`. `check_field_usage` compares
+the current ledger sequence (`env.ledger().sequence()`) with two boundaries:
+
+- `activation_ledger`: the first ledger at which the deprecation is in force. **Inclusive.**
+- `removal_ledger`: the first ledger at which the legacy field is rejected. **Exclusive** end of
+  the compatibility window.
+
+The compatibility window is therefore `[activation_ledger, removal_ledger)`. A window must be
+non-empty (`activation_ledger < removal_ledger`); otherwise registration fails with
+`InvalidWindow` and any previously registered window is kept. A field with no registered window
+fails with `WindowNotFound`, so legacy spellings are never accepted by default.
+
+| Ledger `L` | Phase | Legacy field | Replacement field |
+|---|---|---|---|
+| `L < activation_ledger` | `PreActivation` | accepted (`Accepted`) | rejected (`ReplacementNotActive`) |
+| `activation_ledger <= L < removal_ledger` | `CompatibilityWindow` | accepted, flagged (`AcceptedDeprecated`) | accepted (`Accepted`) |
+| `L >= removal_ledger` | `Removed` | rejected (`LegacyFieldRemoved`) | accepted (`Accepted`) |
+
+Worked example with `activation_ledger = 1000`, `removal_ledger = 2000` (these are the values used
+by the unit tests in `deprecation.rs`):
+
+| Ledger | Legacy field | Replacement field |
+|---|---|---|
+| 999 | `Accepted` | `ReplacementNotActive` |
+| 1000 | `AcceptedDeprecated` | `Accepted` |
+| 1001 | `AcceptedDeprecated` | `Accepted` |
+| 1999 | `AcceptedDeprecated` (last ledger a legacy field is accepted) | `Accepted` |
+| 2000 | `LegacyFieldRemoved` | `Accepted` |
+| 2001 | `LegacyFieldRemoved` | `Accepted` |
+
+`DeprecationWindow::ledgers_until_removal(L)` returns `removal_ledger - L` with saturating
+arithmetic, so it reports `0` at and after removal instead of underflowing. Clients should migrate
+to the replacement field as soon as they see `AcceptedDeprecated`.
